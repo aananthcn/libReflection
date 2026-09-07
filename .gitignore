@@ -1,0 +1,10 @@
+/build/
+build-qnx*/
+/tutorials/build/
+/tutorials/*/build/
+/release/dist/
+*.o
+*.a
+dist/
+__pycache__/
+*.pyc

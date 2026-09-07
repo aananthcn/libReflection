@@ -1,0 +1,27 @@
+# Fully standalone: cd into this directory and
+#   cmake -S . -B build && cmake --build build
+# works with no other step first -- no need to configure/build the
+# root project or tutorials/ first. See docs/adr/0011-tests-vs-tutorials.md.
+cmake_minimum_required(VERSION 3.20)
+
+set(REFLECTION_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+include("${REFLECTION_ROOT_DIR}/cmake/ParseReflectionVersion.cmake")
+
+project(HelloWorldTutorial
+    VERSION ${REFLECTION_VERSION_MAJOR}.${REFLECTION_VERSION_MINOR}.${REFLECTION_VERSION_PATCH}
+    LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+include("${REFLECTION_ROOT_DIR}/cmake/BuildReflectionLibrary.cmake")
+include("${REFLECTION_ROOT_DIR}/cmake/GenerateDwarfReflection.cmake")
+
+add_executable(01_hello_world main.cpp)
+target_link_libraries(01_hello_world PRIVATE Reflection)
+
+reflection_generate_dwarf(
+    TARGET 01_hello_world
+    SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/main.cpp"
+)
