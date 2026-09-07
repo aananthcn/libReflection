@@ -2,10 +2,11 @@
 
 **Status:** Implemented and verified — on the Linux host, via the QNX
 SDP 8.0 cross-toolchain (`x86_64` and `aarch64`), and by running on a
-real QNX 8.0 aarch64 device (not just cross-compiled). 25 Python tests
+real QNX 8.0 aarch64 device (not just cross-compiled). 26 Python tests
 in `tools/test_generate_dwarf_reflection.py`. See "Fixed bugs" for the
-virtual-base-class bug (a serious one — silently zero members — now
-fixed) and "Known limitations" for what's still open.
+virtual-base-class bug (a serious one — silently zero members) and the
+vtable-pointer exposure, both now fixed, and "Known limitations" for
+what's still open.
 
 ## Context
 
@@ -127,11 +128,6 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 
 ## Known limitations, stated plainly
 
-- **DWARF exposes the compiler-generated vtable pointer as an ordinary
-  member** (`_vptr.Base`, type `"<unknown>**"`) for any class with a
-  virtual function — accurate data, but not something a consumer
-  likely wants surfaced as a declared field, with no way to filter it
-  short of checking for a `_vptr.` name prefix. Not fixed.
 - **The extraction driver does not mirror the real target's full
   compile settings** (custom `-D` defines, non-default struct-packing
   pragmas). Equivalent to the real compile for everything tested so
@@ -203,6 +199,17 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   standalone tutorial build). Fixed: `BuildReflectionLibrary.cmake`
   now records the real path in `REFLECTION_GENERATED_INCLUDE_DIR`, used
   by `GenerateDwarfReflection.cmake` instead of re-derived.
+- **DWARF exposed the compiler-generated vtable pointer as an ordinary
+  member** (`_vptr.Base`, type `"<unknown>**"`) for any class with a
+  virtual function — accurate data, but not something a consumer wants
+  surfaced as a declared field. Fixed: `find_type()` now excludes any
+  member whose name starts with `_vptr.` entirely (neither emitted nor
+  reported as skipped — it was never a declared data member, so it's
+  not "unresolved," it's categorically not reflectable data). The
+  class's own `byte_size` is read independently from the class DIE's
+  `DW_AT_byte_size`, so excluding this pseudo-member doesn't affect the
+  reported total size — only removes it from `GetMembers()`. Covered by
+  `test_vtable_pointer_is_excluded_from_members`.
 
 ## Future work: enums
 

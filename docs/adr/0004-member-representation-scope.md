@@ -93,9 +93,9 @@ was checked against it directly (real compiles, real DWARF):
   was actually called somewhere in compiled code; `find_type()` also
   didn't check for an incomplete-declaration DIE). This page's
   "never silently wrong" guarantee holds again.
-- **Lower-severity observation, found alongside it**: DWARF exposes the
-  compiler-generated vtable pointer as an ordinary member
+- **Lower-severity issue, found alongside it, since fixed**: DWARF
+  exposed the compiler-generated vtable pointer as an ordinary member
   (`_vptr.Base`, type `"<unknown>**"`) for any class with a virtual
-  function — accurate data, but not something a consumer likely wants,
-  with no way to filter it short of a name-prefix check. Not fixed;
-  also tracked in [0013](0013-dwarf-based-reflection-generation.md).
+  function. Fixed in [0013](0013-dwarf-based-reflection-generation.md)'s
+  "Fixed bugs": `find_type()` now excludes any `_vptr.`-prefixed member
+  entirely — it was never a declared data member.

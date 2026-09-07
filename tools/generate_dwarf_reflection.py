@@ -377,7 +377,14 @@ def find_type(type_name: str, dies, by_offset):
     the same object than its actual full DW_TAG_structure_type/
     DW_TAG_class_type DIE. Returning the first tag/name match
     unconditionally used to silently return the incomplete stub (zero
-    members, byte_size 0) as if it were the real type."""
+    members, byte_size 0) as if it were the real type.
+
+    A member named "_vptr.<Class>" -- GCC's compiler-generated vtable
+    pointer for any class with a virtual function -- is excluded
+    entirely, not returned in either the member list or skipped_names:
+    it was never a declared data member, so it isn't "resolved" or
+    "skipped", it's simply not reflectable data. See docs/adr/0013's
+    "Fixed bugs"."""
     offset_to_index = {d["offset"]: i for i, d in enumerate(dies)}
     for i, die in enumerate(dies):
         if die["tag"] not in TYPE_DIE_TAGS:
@@ -400,7 +407,16 @@ def find_type(type_name: str, dies, by_offset):
                 type_ref = parse_ref(child["attrs"].get("DW_AT_type", ""))
                 mtype, msize, mcount = resolve_type(type_ref, dies, by_offset, offset_to_index)
                 if mname:
-                    if mtype == "<unknown>":
+                    if mname.startswith("_vptr."):
+                        # GCC's compiler-generated vtable pointer, not
+                        # a declared data member -- excluded entirely,
+                        # not "skipped" (this isn't uncertainty about a
+                        # real member, it's a categorical exclusion of
+                        # something that was never a user field). See
+                        # docs/adr/0013's "Fixed bugs" for how this was
+                        # found.
+                        pass
+                    elif mtype == "<unknown>":
                         skipped.append(mname)
                     else:
                         members.append((mname, mtype, moffset, msize, mcount))

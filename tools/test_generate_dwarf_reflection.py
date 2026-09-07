@@ -288,6 +288,25 @@ class TestEndToEndExtraction(unittest.TestCase):
         )
         self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithVirtualBase, 32)", out)
         self.assertIn('REFLECT_DWARF_MEMBER("v_", "int", 8, 4, 1)', out)
+        self.assertNotIn("_vptr", out)
+
+    def test_vtable_pointer_is_excluded_from_members(self):
+        # Regression test (see docs/adr/0013's "Fixed bugs"): GCC
+        # exposes its own compiler-generated vtable pointer as an
+        # ordinary DW_TAG_member named "_vptr.<Class>" for any class
+        # with a virtual function. It was never a declared data member
+        # and must not show up as one -- only the real member, at its
+        # real (vptr-shifted) offset, should be emitted.
+        out = self._extract(
+            "struct WithVirtualFn {\n"
+            "    virtual ~WithVirtualFn() {}\n"
+            "    virtual void Foo() {}\n"
+            "    int real_value;\n"
+            "};\n"
+        )
+        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithVirtualFn, 16)", out)
+        self.assertIn('REFLECT_DWARF_MEMBER("real_value", "int", 8, 4, 1)', out)
+        self.assertNotIn("_vptr", out)
 
     def test_namespace_qualified_type_name_is_not_truncated(self):
         # Regression test for a real bug in parse_name(): objdump wraps
