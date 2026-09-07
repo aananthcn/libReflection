@@ -77,6 +77,91 @@ class TestDiscoverTypeNames(unittest.TestCase):
         )
         self.assertEqual(names, ["Real"])
 
+    def test_finds_template_instantiation_used_in_source(self):
+        # Regression test (see docs/adr/0013): a template class is never
+        # touch-instantiated by its bare declaration alone (no template
+        # argument is known there), but an actual USE of it elsewhere in
+        # the source -- e.g. "Box<int> instance;" -- names a real,
+        # concrete type that DOES exist in the compiled program, so it's
+        # discovered and touched via its real, canonical spelling.
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "Box<int> instance;\n"
+        )
+        self.assertEqual(names, ["Box<int>"])
+
+    def test_finds_multi_argument_template_instantiation(self):
+        # A multi-argument instantiation's canonical spelling has a
+        # top-level comma ("Pair<int, float>") -- this is exactly the
+        # shape that broke REFLECT_DWARF_CLASS_BEGIN's old (Type, Size)
+        # argument order (the C preprocessor doesn't know "<...>"
+        # protects a comma the way "(...)" does); Type is now the
+        # trailing variadic argument specifically to survive this.
+        names = self._run(
+            "template <typename A, typename B> struct Pair { A first; B second; };\n"
+            "Pair<int, float> instance;\n"
+        )
+        self.assertEqual(names, ["Pair<int, float>"])
+
+    def test_normalizes_instantiation_spacing_variants(self):
+        # "Pair<int,float>" and "Pair< int , float >" name the exact
+        # same type -- both must normalize to GCC's canonical DWARF
+        # spelling ("Pair<int, float>", no space after "<"/before ">",
+        # exactly one space after the comma) so find_type()'s later
+        # exact-string lookup actually matches, and so the two uses
+        # aren't (wrongly) treated as two different types to touch.
+        names = self._run(
+            "template <typename A, typename B> struct Pair { A first; B second; };\n"
+            "Pair<int,float> a;\n"
+            "Pair< int , float > b;\n"
+        )
+        self.assertEqual(names, ["Pair<int, float>"])
+
+    def test_abstains_on_the_outer_layer_of_a_nested_instantiation(self):
+        # "Box<Box<int>>" as a WHOLE is never captured -- this scanner
+        # never parses balanced nested "<...>", only a single,
+        # non-nested argument list, so the outer instantiation is
+        # abstained on rather than guessed at. The regex incidentally
+        # still matches the INNER "Box<int>" on its own, though (it
+        # reads as a plain, non-nested instantiation by itself) -- and
+        # that's a real, independently resolvable type, so finding it
+        # is correct, not a bug, even though it isn't a promise this
+        # scanner makes for every nested case.
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "Box<Box<int>> nested;\n"
+        )
+        self.assertEqual(names, ["Box<int>"])
+
+    def test_abstains_on_implausible_template_argument(self):
+        # Defense against emitting an instantiation that can't possibly
+        # compile: an argument that doesn't look like a type name or an
+        # integer literal (see _TEMPLATE_ARG_SHAPE_RE) -- here, a
+        # floating-point literal -- is abstained on, not guessed at.
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "Box<3.14> floating_point_arg;\n"
+        )
+        self.assertEqual(names, [])
+
+    def test_known_residual_risk_of_bare_integer_comparison(self):
+        # Documented, accepted residual risk (see docs/adr/0013): a
+        # chained relational comparison shaped exactly like a
+        # single-argument template use with an integer-literal argument
+        # ("Box < 5 > threshold") is indistinguishable from a genuine
+        # non-type template instantiation "Box<5>" by text alone. This
+        # test exists to make that trade-off explicit and testable, not
+        # to assert it's fine to leave forever -- a real occurrence of
+        # this shape would surface as a hard, loud compile error in the
+        # generated driver (a name that isn't actually a template
+        # instantiation fails to compile), never as silently wrong
+        # reflection data.
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "void f(int Box, int threshold) { if (Box < 5 > threshold) {} }\n"
+        )
+        self.assertEqual(names, ["Box<5>"])
+
 
 class TestEmitDriver(unittest.TestCase):
     def test_driver_includes_source_and_touches_each_type(self):
@@ -175,7 +260,7 @@ class TestEndToEndExtraction(unittest.TestCase):
 
     def test_public_struct_resolves_correctly(self):
         out = self._extract("struct Vec3 { float x; float y; float z; };")
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Vec3, 12)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(12, "Vec3", Vec3)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("x", "float", 0, 4, 1)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("y", "float", 4, 4, 1)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("z", "float", 8, 4, 1)', out)
@@ -194,7 +279,7 @@ class TestEndToEndExtraction(unittest.TestCase):
             "    float y_;\n"
             "};\n"
         )
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Encapsulated, 8)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(8, "Encapsulated", Encapsulated)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("x_", "int", 0, 4, 1)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("y_", "float", 4, 4, 1)', out)
 
@@ -206,7 +291,7 @@ class TestEndToEndExtraction(unittest.TestCase):
             "    int count = 0;\n"
             "};\n"
         )
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Counter, 4)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(4, "Counter", Counter)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("count", "int", 0, 4, 1)', out)
 
     def test_driver_touch_works_for_non_default_constructible_type(self):
@@ -224,7 +309,7 @@ class TestEndToEndExtraction(unittest.TestCase):
             "    int value_;\n"
             "};\n"
         )
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(RequiresArgs, 4)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(4, "RequiresArgs", RequiresArgs)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("value_", "int", 0, 4, 1)', out)
 
     def test_alignment_padding_matches_real_layout(self):
@@ -242,14 +327,46 @@ class TestEndToEndExtraction(unittest.TestCase):
         # element type/count and the real total byte size (12, not 0),
         # and the real element COUNT (3), not the historical hardcoded 1.
         out = self._extract("struct WithArray { int values[3]; float f; };")
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithArray, 16)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(16, "WithArray", WithArray)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("values", "int[3]", 0, 12, 3)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("f", "float", 12, 4, 1)', out)
 
     def test_multi_dimensional_array_member_resolves(self):
         out = self._extract("struct MultiDim { double grid[2][3]; };")
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(MultiDim, 48)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(48, "MultiDim", MultiDim)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("grid", "double[2][3]", 0, 48, 6)', out)
+
+    def test_template_instantiation_resolves_correctly(self):
+        # Regression test (see docs/adr/0013): a template class used
+        # nowhere but declared ("template <typename T> struct Box {...}")
+        # used to be entirely unreachable -- no bare-declaration touch
+        # is possible without a known argument. A real USE of it in the
+        # source, though, names a real, concrete, existing type -- this
+        # is now discovered and resolved with zero annotation, just
+        # like any non-template type.
+        out = self._extract(
+            "template <typename T> struct Box { T value; };\n"
+            "Box<int> instance;\n"
+        )
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(4, "Box<int>", Box<int>)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("value", "int", 0, 4, 1)', out)
+
+    def test_multi_argument_template_instantiation_resolves_correctly(self):
+        # The critical case: a multi-argument instantiation's canonical
+        # name has a top-level comma ("Pair<int, float>"). Naively
+        # emitting REFLECT_DWARF_CLASS_BEGIN(Pair<int, float>, 8) would
+        # be misparsed by the C preprocessor as THREE macro arguments,
+        # not two -- Type must be the macro's trailing variadic
+        # argument specifically so this comma survives intact (see
+        # src/ReflectionMacros.hpp). This test fails to compile (not
+        # just asserts wrong output) if that regresses.
+        out = self._extract(
+            "template <typename A, typename B> struct Pair { A first; B second; };\n"
+            "Pair<int, float> instance;\n"
+        )
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(8, "Pair<int, float>", Pair<int, float>)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("first", "int", 0, 4, 1)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("second", "float", 4, 4, 1)', out)
 
     def test_std_array_member_resolves_via_its_own_structure_type(self):
         # std::array<T, N> is a real class wrapping a C array internally
@@ -259,7 +376,7 @@ class TestEndToEndExtraction(unittest.TestCase):
         # (unlike a raw C array member, which points straight at a
         # DW_TAG_array_type DIE and needed the fix above).
         out = self._extract("#include <array>\nstruct Samples { std::array<float, 4> values; };")
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Samples, 16)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(16, "Samples", Samples)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("values", "array<float, 4>", 0, 16, 1)', out)
 
     def test_virtual_base_class_resolves_correctly(self):
@@ -269,7 +386,7 @@ class TestEndToEndExtraction(unittest.TestCase):
         # is a union member that's never actually constructed/destroyed
         # -- only an incomplete DW_AT_declaration stub (byte_size 0, no
         # members). This used to make WithVirtualBase silently resolve
-        # to REFLECT_DWARF_CLASS_BEGIN(WithVirtualBase, 0) with NO
+        # to REFLECT_DWARF_CLASS_BEGIN(0, "WithVirtualBase", WithVirtualBase) with NO
         # members at all -- not a compile error, not an abstention,
         # just silently wrong. Also exercises the hardest combination:
         # a virtual base AND a constructor requiring an argument AND a
@@ -286,7 +403,7 @@ class TestEndToEndExtraction(unittest.TestCase):
             "    int v_;\n"
             "};\n"
         )
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithVirtualBase, 32)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(32, "WithVirtualBase", WithVirtualBase)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("v_", "int", 8, 4, 1)', out)
         self.assertNotIn("_vptr", out)
 
@@ -304,7 +421,7 @@ class TestEndToEndExtraction(unittest.TestCase):
             "    int real_value;\n"
             "};\n"
         )
-        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithVirtualFn, 16)", out)
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(16, "WithVirtualFn", WithVirtualFn)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("real_value", "int", 8, 4, 1)', out)
         self.assertNotIn("_vptr", out)
 

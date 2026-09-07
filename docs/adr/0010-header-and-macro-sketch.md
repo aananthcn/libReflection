@@ -140,16 +140,26 @@ is an access-checked expression either.
 
 ```cpp
 // From src/ReflectionMacros.hpp -- normally generated, never hand-written:
-#define REFLECT_DWARF_CLASS_BEGIN(Type, ByteSize)  /* opens TypeInfo<Type> specialization */
+#define REFLECT_DWARF_CLASS_BEGIN(ByteSize, Name, ...)  /* opens TypeInfo<...> specialization */
 #define REFLECT_DWARF_MEMBER(Name, TypeName, Offset, Size, Count)  /* one literal member */
 #define REFLECT_DWARF_CLASS_END()                  /* closes it */
 
 // Generated example (see tutorials/01_hello_world/):
-REFLECT_DWARF_CLASS_BEGIN(PoorPoint, 8)
+REFLECT_DWARF_CLASS_BEGIN(8, "PoorPoint", PoorPoint)
     REFLECT_DWARF_MEMBER("x", "int", 0, 4, 1)
     REFLECT_DWARF_MEMBER("y", "int", 4, 4, 1)
 REFLECT_DWARF_CLASS_END()
 ```
+
+The actual type is the macro's trailing *variadic* argument, not its
+first — deliberate: a template instantiation's canonical name can have
+a top-level comma (`Pair<int, float>`), which the C preprocessor would
+otherwise misparse as extra macro arguments (angle brackets don't
+protect a comma the way parentheses do). `Name` is passed as an
+explicit string literal for the same reason `REFLECT_DWARF_MEMBER`'s
+`Name`/`TypeName` always have been, rather than derived via `#Type`
+stringification. See
+[0013](0013-dwarf-based-reflection-generation.md)'s "Fixed bugs".
 
 `Count` is 1 for an ordinary member; for a fixed-size array member
 (e.g. `"int[4]"`) it's the real element count, read from DWARF the

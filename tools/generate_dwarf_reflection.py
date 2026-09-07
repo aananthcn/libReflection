@@ -19,10 +19,12 @@ access control, and a member that doesn't confidently resolve is
 simply omitted (an incomplete-but-correct reflection), never guessed.
 
 The only text-scanning this script does is finding top-level
-`struct NAME`/`class NAME` declarations, to know which type NAMES to
-look for in the DWARF -- it never needs to understand a class BODY
-(no need to distinguish public/private, spot bit-fields, etc.); DWARF
-already carries all of that.
+`struct NAME`/`class NAME` declarations (plus, for a template, actual
+USES of it elsewhere in the same file set, e.g. "Box<int> value;" --
+a template's bare declaration alone can't be touch-instantiated), to
+know which type NAMES to look for in the DWARF -- it never needs to
+understand a class BODY (no need to distinguish public/private, spot
+bit-fields, etc.); DWARF already carries all of that.
 
 Two modes, both driven by CMake (see cmake/GenerateDwarfReflection.cmake):
 
@@ -91,25 +93,70 @@ def _strip_noise(text: str) -> str:
 
 
 LOCAL_INCLUDE_RE = re.compile(r'#\s*include\s*"([^"]+)"')
-# A template can't be safely touch-instantiated (no template arguments
-# are known), so a "struct/class Name" immediately preceded by a
-# template<...> parameter list must be excluded at discovery time --
-# generating "Name touch_Name;" for a bare template name is a compile
-# error (verified), not a gracefully-skipped case.
+# A template class declaration itself can't be safely touch-
+# instantiated (no template arguments are known from the declaration
+# alone) -- a "struct/class Name" immediately preceded by a
+# template<...> parameter list is excluded from the plain type-name
+# list. Its base NAME is tracked separately (see
+# discover_type_names()) so actual USES of it elsewhere in the source
+# -- e.g. "Box<int> value;" -- can be found and touched instead;
+# generating "Name touch_Name;" for a bare template name (no
+# arguments) is a compile error (verified), not a gracefully-skipped
+# case.
 _TEMPLATE_PRECEDING_RE = re.compile(r"template\s*<[^;{}]*>\s*$")
 
+# Matches a use of a known template name with a NON-nested argument
+# list (deliberately excludes "<" and ">" from the argument character
+# class -- a nested template argument like "Box<std::vector<int>>" is
+# abstained on, not guessed at, same conservative policy as everything
+# else this scanner does). The "(...)"  and function-call-shaped
+# exclusions in the character class also keep this from matching inside
+# a parameter list or expression it can't confidently parse.
+def _template_use_re(name: str) -> "re.Pattern":
+    return re.compile(r"\b" + re.escape(name) + r"\s*<([^<>;{}()]*)>")
 
-def discover_type_names(source_path: str, _visited=None):
-    """Scans source_path, and every LOCAL ("...") header it #includes
-    (transitively), for top-level struct/class declarations. System/
-    library (<...>) includes are never followed. A type declared
-    anywhere in this file set -- main.cpp itself, or a header it pulls
-    in -- is discovered without needing to be listed anywhere."""
+
+# A template argument list is only trusted if every comma-separated
+# piece looks like a plain type name (optionally qualified, pointer/
+# reference-decorated) or an integer literal (for a non-type template
+# parameter) -- never an arbitrary expression. This exists specifically
+# to reject a false-positive match like "Box < 5 > threshold" (a
+# chained relational comparison, not a template instantiation): most
+# such expressions won't have this shape, and any that do are the one
+# documented residual risk of this heuristic -- see docs/adr/0013.
+_TEMPLATE_ARG_SHAPE_RE = re.compile(r"^[\w:\s*&-]+$")
+
+
+def _normalize_template_instantiation(name: str, args_str: str):
+    """Returns the canonical "Name<arg1, arg2>" spelling GCC uses in
+    DWARF (no space after "<" or before ">", exactly one space after
+    each comma) for a template use's raw argument text, or None if any
+    argument doesn't look like a plausible type/value (see
+    _TEMPLATE_ARG_SHAPE_RE) -- abstain rather than emit an instantiation
+    that can't possibly compile."""
+    args = [a.strip() for a in args_str.split(",")]
+    if not args or any(not a or not _TEMPLATE_ARG_SHAPE_RE.match(a) for a in args):
+        return None
+    args = [re.sub(r"\s+", " ", a) for a in args]
+    return f"{name}<{', '.join(args)}>"
+
+
+def _scan_declarations(source_path: str, _visited=None, _texts=None):
+    """Recursive core of discover_type_names(): scans source_path, and
+    every LOCAL ("...") header it #includes (transitively), for
+    top-level struct/class declarations. System/library (<...>)
+    includes are never followed. Returns (names, template_names) --
+    template_names are tracked separately, not touch-instantiated
+    directly (see _TEMPLATE_PRECEDING_RE) -- and _texts (an
+    out-parameter dict, if given) accumulates each visited file's
+    comment/string-stripped text, keyed by resolved path, so a caller
+    can search the whole file set again for template USES without
+    re-reading anything from disk."""
     if _visited is None:
         _visited = set()
     path = Path(source_path).resolve()
     if path in _visited or not path.is_file():
-        return []
+        return [], []
     _visited.add(path)
 
     raw = path.read_text()
@@ -121,25 +168,89 @@ def discover_type_names(source_path: str, _visited=None):
     comments_stripped = _strip_comments(raw)
     text = _STRING_LITERAL_RE.sub('""', comments_stripped)
     text = _CHAR_LITERAL_RE.sub("' '", text)
+    if _texts is not None:
+        _texts[path] = text
 
     names = []
+    template_names = []
     seen = set()
+    seen_templates = set()
     for m in TYPE_DECL_RE.finditer(text):
-        if _TEMPLATE_PRECEDING_RE.search(text[:m.start()]):
-            continue
         name = m.group(1)
+        if _TEMPLATE_PRECEDING_RE.search(text[:m.start()]):
+            if name not in seen_templates:
+                seen_templates.add(name)
+                template_names.append(name)
+            continue
         if name not in seen:
             seen.add(name)
             names.append(name)
 
     for m in LOCAL_INCLUDE_RE.finditer(comments_stripped):
         included = (path.parent / m.group(1)).resolve()
-        for name in discover_type_names(str(included), _visited):
+        inc_names, inc_templates = _scan_declarations(str(included), _visited, _texts)
+        for name in inc_names:
             if name not in seen:
                 seen.add(name)
                 names.append(name)
+        for name in inc_templates:
+            if name not in seen_templates:
+                seen_templates.add(name)
+                template_names.append(name)
 
+    return names, template_names
+
+
+def discover_type_names(source_path: str, _visited=None):
+    """Scans source_path, and every LOCAL ("...") header it #includes
+    (transitively), for top-level struct/class declarations. System/
+    library (<...>) includes are never followed. A type declared
+    anywhere in this file set -- main.cpp itself, or a header it pulls
+    in -- is discovered without needing to be listed anywhere.
+
+    A template class declaration alone (e.g. "template <typename T>
+    struct Box {...};") can't be touch-instantiated -- there's no
+    template argument to fill in. Instead, once every file in the set
+    has been scanned for declarations, the SAME file set is searched
+    again for actual USES of each discovered template name (e.g.
+    "Box<int> value;" appearing anywhere in that file set) --
+    real instantiations, since a type that's never actually used
+    nowhere exists to reflect anyway. Each distinct, plausible
+    instantiation (see _normalize_template_instantiation) is appended
+    to the returned name list in its canonical "Box<int>" spelling,
+    matching how GCC names it in DWARF. A use this scanner can't
+    confidently parse (a nested template argument, an argument that
+    doesn't look like a type or literal) is skipped, not guessed at."""
+    visited = set() if _visited is None else _visited
+    texts = {}
+    names, template_names = _scan_declarations(source_path, visited, texts)
+    if not template_names:
+        return names
+
+    seen = set(names)
+    for template_name in template_names:
+        use_re = _template_use_re(template_name)
+        seen_instantiations = set()
+        for text in texts.values():
+            for m in use_re.finditer(text):
+                instantiation = _normalize_template_instantiation(template_name, m.group(1))
+                if instantiation is None or instantiation in seen_instantiations:
+                    continue
+                seen_instantiations.add(instantiation)
+                if instantiation not in seen:
+                    seen.add(instantiation)
+                    names.append(instantiation)
     return names
+
+
+def _sanitize_identifier(name: str) -> str:
+    """Turns a type name that isn't necessarily a valid C++ identifier
+    by itself -- a template instantiation like "Box<int>" -- into one
+    that is, for the driver's own internal Touch_/touch_/NeverCalled_
+    wrapper symbol names below. Never used for the type itself (which
+    keeps its real spelling, e.g. "Box<int>", everywhere it's actually
+    used as a type)."""
+    return re.sub(r"[^0-9A-Za-z_]", "_", name)
 
 
 def emit_driver(source_path: str, output_path: Path):
@@ -175,6 +286,7 @@ def emit_driver(source_path: str, output_path: Path):
         lines.append("    }")
         lines.append("}")
         lines.append("")
+        seen_idents = set()
         for name in type_names:
             # A plain "Type touch_Type;" only works for default-
             # constructible types -- verified this fails to compile
@@ -186,14 +298,24 @@ def emit_driver(source_path: str, output_path: Path):
             # union has a real Encapsulated sub-object, verified via
             # DWARF) without ever constructing/destructing the member
             # itself, so no constructor arguments are ever needed.
-            lines.append(f"union Touch_{name} {{")
+            #
+            # ident is a sanitized identifier for the wrapper's OWN
+            # symbol names only -- name itself (used below wherever the
+            # real type is needed) may not be a valid identifier, e.g.
+            # a template instantiation like "Box<int>" (see
+            # discover_type_names()).
+            ident = _sanitize_identifier(name)
+            if ident in seen_idents:
+                ident = f"{ident}_{len(seen_idents)}"
+            seen_idents.add(ident)
+            lines.append(f"union Touch_{ident} {{")
             lines.append(f"    {name} value;")
             lines.append("    char dummy;")
-            lines.append(f"    Touch_{name}() : dummy(0) {{}}")
-            lines.append(f"    ~Touch_{name}() {{}}")
+            lines.append(f"    Touch_{ident}() : dummy(0) {{}}")
+            lines.append(f"    ~Touch_{ident}() {{}}")
             lines.append("};")
-            lines.append(f"Touch_{name} touch_{name};")
-            lines.append(f"void NeverCalled_{name}() {{ ForceFullDwarf(touch_{name}.value); }}")
+            lines.append(f"Touch_{ident} touch_{ident};")
+            lines.append(f"void NeverCalled_{ident}() {{ ForceFullDwarf(touch_{ident}.value); }}")
         lines.append("}")
     output_path.write_text("\n".join(lines) + "\n")
 
@@ -452,7 +574,12 @@ def extract(object_path: str, source_path: str, output_path: Path, objdump: str 
             lines.append(f"// {type_name}: not found in DWARF info -- skipped, not guessed.")
             continue
         byte_size, members, skipped = result
-        lines.append(f"REFLECT_DWARF_CLASS_BEGIN({type_name}, {byte_size})")
+        # Type is REFLECT_DWARF_CLASS_BEGIN's trailing variadic
+        # argument, not its first, specifically so a template
+        # instantiation's top-level comma (e.g. "Pair<int, float>")
+        # doesn't get misparsed as an extra macro argument by the
+        # preprocessor -- see src/ReflectionMacros.hpp's comment.
+        lines.append(f'REFLECT_DWARF_CLASS_BEGIN({byte_size}, "{type_name}", {type_name})')
         for mname, mtype, moffset, msize, mcount in members:
             lines.append(
                 f'    REFLECT_DWARF_MEMBER("{mname}", "{mtype}", {moffset}, {msize}, {mcount})'

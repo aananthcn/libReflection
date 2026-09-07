@@ -2,11 +2,12 @@
 
 **Status:** Implemented and verified — on the Linux host, via the QNX
 SDP 8.0 cross-toolchain (`x86_64` and `aarch64`), and by running on a
-real QNX 8.0 aarch64 device (not just cross-compiled). 26 Python tests
+real QNX 8.0 aarch64 device (not just cross-compiled). 34 Python tests
 in `tools/test_generate_dwarf_reflection.py`. See "Fixed bugs" for the
-virtual-base-class bug (a serious one — silently zero members) and the
-vtable-pointer exposure, both now fixed, and "Known limitations" for
-what's still open.
+virtual-base-class bug (a serious one — silently zero members), the
+vtable-pointer exposure, the flags-mirroring gap, and template
+discovery, all now fixed/closed, and "Known limitations" for what's
+still open.
 
 ## Context
 
@@ -48,9 +49,12 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
    regex-scans `SOURCE` and every local (`"..."`, never `<...>`)
    header it `#include`s transitively for top-level `struct`/`class`
    declarations. Only needs NAMES — DWARF handles everything about
-   what's inside them. Templated declarations are excluded (can't be
-   touch-instantiated without knowing the template argument); enums
-   are not discovered yet (see "Future work").
+   what's inside them. A template's bare declaration alone can't be
+   touch-instantiated (no template argument is known there), so the
+   same file set is searched again for actual USES of each discovered
+   template (e.g. `Box<int> value;`) instead — see "Fixed bugs" for how
+   this works and its residual risks. Enums are not discovered yet
+   (see "Future work").
 2. **Emit a driver**: a throwaway `.cpp` that `#include`s `SOURCE` and
    declares one instance of each discovered type, to force the
    compiler to emit that type's *full* DWARF (a type merely named in
@@ -132,9 +136,25 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 
 ## Known limitations, stated plainly
 
-- **Templates are excluded from discovery entirely** — a templated
-  type still needs a hand-written `REFLECT_CLASS_BEGIN`, or a future
-  extension that knows which concrete instantiations to touch.
+- **A template instantiation used only inside a nested template
+  argument is never captured as a whole** (e.g. `Box<Box<int>>` itself
+  is never touched, though the inner `Box<int>` incidentally is, since
+  it also appears as a plain, non-nested match on its own) — this
+  scanner never parses balanced nested `<...>`, only a single,
+  non-nested argument list. A type that's *only* ever used this way
+  still needs a hand-written `REFLECT_CLASS_BEGIN`.
+- **A chained relational comparison shaped exactly like a
+  single-argument template use with an integer-literal argument** (e.g.
+  `Box < 5 > threshold`) is indistinguishable from a genuine non-type
+  template instantiation `Box<5>` by text alone, and is *not* filtered
+  out — see `tools/test_generate_dwarf_reflection.py`'s
+  `test_known_residual_risk_of_bare_integer_comparison`, which records
+  this as an accepted, understood trade-off. Low real-world risk
+  (unparenthesized chained comparisons are rare and usually already
+  flagged by `-Wparentheses`), and the failure mode if it ever happens
+  is a **loud, hard compile error** in the generated driver (a name
+  that isn't actually a template instantiation fails to compile) —
+  never silently wrong reflection data.
 - **A truly unresolvable member's type is silently absent, not loudly
   flagged.** `find_type()` skips it with a
   `// <name>: type not resolved in DWARF info -- skipped, not guessed.`
@@ -228,6 +248,48 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   Verified end to end: a `target_compile_definitions()` macro that
   changes a member's array size (`#ifdef`-guarded) is now correctly
   reflected in the extracted layout, cross-compiled for QNX SDP 8.0 too.
+- **Templates were excluded from discovery entirely** — a template
+  class's bare declaration alone can't be touch-instantiated (no
+  template argument is known there), so it was skipped outright, with
+  no path to reach it non-intrusively. Fixed: `discover_type_names()`
+  now tracks each discovered template's base name separately, then
+  searches the same file set again for actual USES of it (e.g.
+  `Box<int> value;`) — a type that's genuinely instantiated somewhere
+  in the program is a real, existing type, resolvable the same way any
+  other type is. Each distinct use is normalized to GCC's canonical
+  DWARF spelling (`_normalize_template_instantiation()`: no space
+  after `<`/before `>`, exactly one space after each comma — verified
+  against real compiled output) so `find_type()`'s later exact-string
+  lookup matches; a use with a nested template argument (e.g.
+  `Box<Box<int>>`'s outer layer) or an argument that doesn't look like
+  a plausible type/literal (`_TEMPLATE_ARG_SHAPE_RE`) is abstained on,
+  not guessed at — see "Known limitations" for the two residual risks
+  this still leaves.
+
+  **A second, compounding bug found while building this**: a
+  multi-argument instantiation's canonical name has a top-level comma
+  (`Pair<int, float>`) — naively emitting
+  `REFLECT_DWARF_CLASS_BEGIN(Pair<int, float>, 8)` gets misparsed by
+  the C preprocessor as **three** macro arguments, not two (angle
+  brackets don't protect a comma from argument-splitting the way
+  parentheses do) — a hard compile error for any multi-argument
+  template, not a silent one. Fixed by changing
+  `REFLECT_DWARF_CLASS_BEGIN`'s signature to
+  `(ByteSize, Name, ...)`, making the type itself the macro's trailing
+  *variadic* argument (`__VA_ARGS__` captures everything after `Name`
+  verbatim, comma included) and passing `Name` as an explicit string
+  literal instead of deriving it via `#Type` stringification (which
+  doesn't need to change now that `Type` and `Name` are separate
+  parameters). Verified end to end, including that the generated
+  header actually compiles when consumed by real code, not just that
+  its generated text looks right: both `Box<int>` and
+  `Pair<int, float>` resolve correctly with real member names, sizes,
+  and offsets. Covered by
+  `test_finds_template_instantiation_used_in_source`,
+  `test_finds_multi_argument_template_instantiation`,
+  `test_normalizes_instantiation_spacing_variants`,
+  `test_template_instantiation_resolves_correctly`, and
+  `test_multi_argument_template_instantiation_resolves_correctly`.
 
 ## Future work: enums
 

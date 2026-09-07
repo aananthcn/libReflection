@@ -56,7 +56,7 @@
 // distinguish them either.
 //
 // Usage (normally generated, shown here for reference):
-//   REFLECT_DWARF_CLASS_BEGIN(PoorPoint, 8)
+//   REFLECT_DWARF_CLASS_BEGIN(8, "PoorPoint", PoorPoint)
 //       REFLECT_DWARF_MEMBER("x", "int", 0, 4, 1)
 //       REFLECT_DWARF_MEMBER("y", "int", 4, 4, 1)
 //   REFLECT_DWARF_CLASS_END()
@@ -66,13 +66,25 @@
 // DW_TAG_subrange_type the same way Size is -- see
 // docs/adr/0013-dwarf-based-reflection-generation.md's "Array-member
 // bug found and fixed".
+//
+// The actual type is the LAST, variadic (...) argument, not the
+// first -- deliberate, not stylistic: a template instantiation like
+// "Pair<int, float>" contains a top-level comma the C preprocessor
+// would otherwise split on when parsing macro arguments (angle
+// brackets don't protect a comma the way parentheses do). As the
+// trailing __VA_ARGS__, everything after Name is captured verbatim,
+// comma and all. Name is a separate, explicit string literal (not
+// derived via #Type stringification) for the same reason -- Python
+// already knows the exact name to emit and does so directly, the same
+// way REFLECT_DWARF_MEMBER's Name/TypeName always have been. See
+// docs/adr/0013-dwarf-based-reflection-generation.md's "Fixed bugs".
 
-#define REFLECT_DWARF_CLASS_BEGIN(Type, ByteSize)                            \
+#define REFLECT_DWARF_CLASS_BEGIN(ByteSize, Name, ...)                       \
     template <>                                                              \
-    struct reflect::TypeInfo<Type> {                                         \
+    struct reflect::TypeInfo<__VA_ARGS__> {                                  \
         static ::reflect::ClassReflection Describe() {                       \
             ::reflect::ClassReflection r;                                    \
-            r.name = r.type = #Type;                                         \
+            r.name = r.type = Name;                                          \
             r.size = static_cast<std::uint32_t>(ByteSize);                   \
             r.count = 1;
 
