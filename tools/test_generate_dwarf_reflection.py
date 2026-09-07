@@ -106,6 +106,31 @@ class TestEmitDriver(unittest.TestCase):
         self.assertNotIn("reflect_dwarf_extraction_touch", content)
 
 
+class TestParseName(unittest.TestCase):
+    def test_plain_name_unwrapped(self):
+        self.assertEqual(gen.parse_name("PoorPoint"), "PoorPoint")
+
+    def test_indirect_string_prefix_is_stripped(self):
+        self.assertEqual(
+            gen.parse_name("(indirect string, offset: 0x123): PoorPoint"), "PoorPoint"
+        )
+
+    def test_namespace_qualified_name_is_not_truncated(self):
+        # Regression test for a real bug: rsplit(":", 1) used to grab
+        # everything after the LAST ":" in the whole string, which for
+        # a namespace-qualified name (containing "::") lands INSIDE the
+        # name itself, not at the intended "(indirect string, ...): "
+        # prefix boundary.
+        raw = (
+            "(indirect string, offset: 0x26c6): "
+            "basic_string<char, std::char_traits<char>, std::allocator<char> >"
+        )
+        self.assertEqual(
+            gen.parse_name(raw),
+            "basic_string<char, std::char_traits<char>, std::allocator<char> >",
+        )
+
+
 @unittest.skipUnless(has_toolchain(), "requires g++ and objdump on PATH")
 class TestEndToEndExtraction(unittest.TestCase):
     def _extract(self, source_text: str) -> str:
@@ -140,9 +165,9 @@ class TestEndToEndExtraction(unittest.TestCase):
     def test_public_struct_resolves_correctly(self):
         out = self._extract("struct Vec3 { float x; float y; float z; };")
         self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Vec3, 12)", out)
-        self.assertIn('REFLECT_DWARF_MEMBER("x", "float", 0, 4)', out)
-        self.assertIn('REFLECT_DWARF_MEMBER("y", "float", 4, 4)', out)
-        self.assertIn('REFLECT_DWARF_MEMBER("z", "float", 8, 4)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("x", "float", 0, 4, 1)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("y", "float", 4, 4, 1)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("z", "float", 8, 4, 1)', out)
 
     def test_private_members_resolve_with_correct_offsets(self):
         # The entire point of this tool: DWARF exposes private members,
@@ -159,8 +184,8 @@ class TestEndToEndExtraction(unittest.TestCase):
             "};\n"
         )
         self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Encapsulated, 8)", out)
-        self.assertIn('REFLECT_DWARF_MEMBER("x_", "int", 0, 4)', out)
-        self.assertIn('REFLECT_DWARF_MEMBER("y_", "float", 4, 4)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("x_", "int", 0, 4, 1)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("y_", "float", 4, 4, 1)', out)
 
     def test_non_aggregate_with_method_resolves(self):
         out = self._extract(
@@ -171,7 +196,7 @@ class TestEndToEndExtraction(unittest.TestCase):
             "};\n"
         )
         self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Counter, 4)", out)
-        self.assertIn('REFLECT_DWARF_MEMBER("count", "int", 0, 4)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("count", "int", 0, 4, 1)', out)
 
     def test_driver_touch_works_for_non_default_constructible_type(self):
         # This is the exact case a plain "Type touch_Type;" fails to
@@ -189,14 +214,74 @@ class TestEndToEndExtraction(unittest.TestCase):
             "};\n"
         )
         self.assertIn("REFLECT_DWARF_CLASS_BEGIN(RequiresArgs, 4)", out)
-        self.assertIn('REFLECT_DWARF_MEMBER("value_", "int", 0, 4)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("value_", "int", 0, 4, 1)', out)
 
     def test_alignment_padding_matches_real_layout(self):
         # double then char forces padding -- the generated offset must
         # match the REAL compiled layout, not a naive sum of sizes.
         out = self._extract("struct Widget { double weight; char code; };")
-        self.assertIn('REFLECT_DWARF_MEMBER("weight", "double", 0, 8)', out)
-        self.assertIn('REFLECT_DWARF_MEMBER("code", "char", 8, 1)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("weight", "double", 0, 8, 1)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("code", "char", 8, 1, 1)', out)
+
+    def test_fixed_size_array_member_resolves_with_correct_size(self):
+        # Regression test for docs/adr/0013's "Known open risks" bug:
+        # resolve_type() had no DW_TAG_array_type case, so an array
+        # member silently got ("<unknown>", 0) -- a real member's SIZE
+        # reported as 0, not an abstention. Must resolve to the real
+        # element type/count and the real total byte size (12, not 0),
+        # and the real element COUNT (3), not the historical hardcoded 1.
+        out = self._extract("struct WithArray { int values[3]; float f; };")
+        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithArray, 16)", out)
+        self.assertIn('REFLECT_DWARF_MEMBER("values", "int[3]", 0, 12, 3)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("f", "float", 12, 4, 1)', out)
+
+    def test_multi_dimensional_array_member_resolves(self):
+        out = self._extract("struct MultiDim { double grid[2][3]; };")
+        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(MultiDim, 48)", out)
+        self.assertIn('REFLECT_DWARF_MEMBER("grid", "double[2][3]", 0, 48, 6)', out)
+
+    def test_std_array_member_resolves_via_its_own_structure_type(self):
+        # std::array<T, N> is a real class wrapping a C array internally
+        # -- its own DW_TAG_structure_type DIE already carries a real
+        # name and byte_size directly, so this needs no special case in
+        # resolve_type() beyond the existing structure/class branch
+        # (unlike a raw C array member, which points straight at a
+        # DW_TAG_array_type DIE and needed the fix above).
+        out = self._extract("#include <array>\nstruct Samples { std::array<float, 4> values; };")
+        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Samples, 16)", out)
+        self.assertIn('REFLECT_DWARF_MEMBER("values", "array<float, 4>", 0, 16, 1)', out)
+
+    def test_namespace_qualified_type_name_is_not_truncated(self):
+        # Regression test for a real bug in parse_name(): objdump wraps
+        # some DW_AT_name values as
+        # "(indirect string, offset: 0x...): <real name>", and the real
+        # name of ANY namespace-qualified type (std::vector, std::string,
+        # ...) itself contains "::" -- e.g.
+        # "vector<int, std::allocator<int> >". parse_name() used to grab
+        # everything after the LAST ":" in the whole string (rsplit),
+        # which lands inside that "::" and silently truncates the name
+        # to "allocator<int> >" instead of stripping only the intended
+        # "(indirect string, ...): " prefix.
+        out = self._extract(
+            "#include <vector>\n#include <string>\n"
+            "struct WithContainers { std::vector<int> items; std::string name; };"
+        )
+        self.assertIn(
+            'REFLECT_DWARF_MEMBER("items", "vector<int, std::allocator<int> >", 0, 24, 1)', out
+        )
+        self.assertIn(
+            'REFLECT_DWARF_MEMBER("name", '
+            '"basic_string<char, std::char_traits<char>, std::allocator<char> >", 24, 32, 1)',
+            out,
+        )
+
+    def test_unresolvable_member_is_skipped_not_guessed(self):
+        # find_type() must never fall back to emitting resolve_type()'s
+        # "<unknown>" sentinel as a literal REFLECT_DWARF_MEMBER -- an
+        # unresolvable member is left out and noted in a comment
+        # instead (this is what the array-member bug above violated).
+        out = self._extract("struct WithArray { int values[3]; float f; };")
+        self.assertNotIn('"<unknown>"', out)
 
     def test_find_type_returns_none_for_a_name_not_in_dwarf(self):
         # Exercises find_type()'s "not found" path directly against a

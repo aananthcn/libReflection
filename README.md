@@ -100,7 +100,7 @@ project** — not part of this repo's main build, not built by the
 instructions above — because a tutorial is meant to be a place a human
 builds and tries things out independently, not something dragged along
 every time the library itself is built (see
-[docs/adr/0011](docs/adr/0011-tests-vs-tutorials.md)). It has no
+[docs/adr/0011](docs/adr/0011-tutorials-and-their-purpose.md)). It has no
 dependency on the root project having been configured or built first:
 
 ```sh
@@ -111,6 +111,7 @@ cmake --build build
 ./build/01_hello_world/01_hello_world
 ./build/02_auto_reflect_legacy_struct/02_auto_reflect_legacy_struct
 ./build/03_macros_for_special_cases/03_macros_for_special_cases
+./build/04_dwarf_arrays/04_dwarf_arrays
 ```
 
 Each numbered subdirectory is independently standalone too — e.g.
@@ -202,24 +203,41 @@ One `cmake --build` runs the whole pipeline; adding a brand-new type
 to `main.cpp` resolves correctly on the next build with no other
 change. Walkthrough: [`tutorials/01_hello_world/`](tutorials/01_hello_world/README.md).
 
+**One caveat on where `reflect::Reflect<T>()` calls can live**: `SOURCE`
+itself must not call `reflect::Reflect<T>()` for a type with a direct
+array member (or anything else automatic aggregate reflection hard-
+fails to compile) — the extraction driver `#include`s `SOURCE`
+verbatim, so on a fresh build that call would hit the *unspecialized*
+fallback before the DWARF header has real content. See
+[docs/adr/0013](docs/adr/0013-dwarf-based-reflection-generation.md)'s
+"Requirements on SOURCE" and
+[`tutorials/04_dwarf_arrays/`](tutorials/04_dwarf_arrays/README.md),
+which resolves fixed-size C arrays (including multi-dimensional ones)
+and `std::array<T, N>` this way by keeping such types in a separate
+header with no `reflect::Reflect<T>()` calls in it.
+
 ### The escape hatch: `REFLECT_CLASS_BEGIN`/`REFLECT_ENUM_BEGIN`
 
 Needed for: **enums** (always — there's no automatic path for enum
-value names), **a direct fixed-size array member** (the DWARF pipeline
-above doesn't correctly resolve one yet either — see
+value names), **a direct fixed-size array member if you're using
+automatic reflection alone** (the DWARF pipeline above now resolves a
+fixed-size array member correctly, including multi-dimensional ones —
+this used to be a real bug, see
 [docs/adr/0013](docs/adr/0013-dwarf-based-reflection-generation.md)'s
-"Known open risks"), and whenever **real, distinguishable names/
-identity** matter (two different but structurally identical
-auto-reflected types would otherwise hash identically — see
+"Fixed bugs" — but plain automatic reflection
+with no DWARF pipeline wired in still can't count them), and whenever
+**real, distinguishable names/identity** matter (two different but
+structurally identical auto-reflected types would otherwise hash
+identically — see
 [docs/adr/0001](docs/adr/0001-reflection-generation-strategy.md)).
 Reaches public members only without a `friend` declaration — see the
 DWARF pipeline above for the non-intrusive private-member path.
 
-**Not the accepted final answer for enums or array members either** —
-same as the private-member case the DWARF pipeline above already
-eliminated, both are addressable by extending that same pipeline
-(DWARF already records an enum's named values and an array's element
-type/count, unconditionally), just not done yet; see
+**Not the accepted final answer for enums either** — same as the
+private-member and array-member cases the DWARF pipeline above already
+eliminated, enum value names are addressable by extending that same
+pipeline (DWARF already records them unconditionally), just not done
+yet; see
 [docs/adr/0013](docs/adr/0013-dwarf-based-reflection-generation.md)'s
 "Future work" section.
 
@@ -275,7 +293,7 @@ full reasoning.
 kinds above — anything heap-owning (`std::string`, pointers, dynamic
 containers) is meaningless once copied into another process's address
 space. See
-[docs/adr/0009](docs/adr/0009-versioning-and-hash-purpose.md).
+[docs/adr/0002](docs/adr/0002-class-hash-algorithm-and-purpose.md).
 
 ## Folder layout
 

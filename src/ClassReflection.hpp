@@ -25,8 +25,8 @@ inline constexpr const char* kAutoAggregateTypeName = "<aggregate>";
  *
  * Used to detect layout drift between independently-built processes that
  * share a struct definition over shared-memory IPC (see
- * docs/adr/0002-class-hash-algorithm.md and
- * docs/adr/0009-versioning-and-hash-purpose.md). Not a cryptographic hash.
+ * docs/adr/0002-class-hash-algorithm-and-purpose.md). Not a cryptographic
+ * hash.
  */
 class ClassHash {
 public:

@@ -57,9 +57,15 @@
 //
 // Usage (normally generated, shown here for reference):
 //   REFLECT_DWARF_CLASS_BEGIN(PoorPoint, 8)
-//       REFLECT_DWARF_MEMBER("x", "int", 0, 4)
-//       REFLECT_DWARF_MEMBER("y", "int", 4, 4)
+//       REFLECT_DWARF_MEMBER("x", "int", 0, 4, 1)
+//       REFLECT_DWARF_MEMBER("y", "int", 4, 4, 1)
 //   REFLECT_DWARF_CLASS_END()
+//
+// Count is 1 for an ordinary member; for a fixed-size array member
+// (e.g. "int[4]") it's the real element count (4), read from DWARF's
+// DW_TAG_subrange_type the same way Size is -- see
+// docs/adr/0013-dwarf-based-reflection-generation.md's "Array-member
+// bug found and fixed".
 
 #define REFLECT_DWARF_CLASS_BEGIN(Type, ByteSize)                            \
     template <>                                                              \
@@ -70,14 +76,14 @@
             r.size = static_cast<std::uint32_t>(ByteSize);                   \
             r.count = 1;
 
-#define REFLECT_DWARF_MEMBER(Name, TypeName, Offset, Size)                   \
+#define REFLECT_DWARF_MEMBER(Name, TypeName, Offset, Size, Count)            \
             {                                                                \
                 ::reflect::ClassReflection m;                                \
                 m.name = Name;                                               \
                 m.type = TypeName;                                           \
                 m.offset = static_cast<std::uint32_t>(Offset);               \
                 m.size = static_cast<std::uint32_t>(Size);                   \
-                m.count = 1;                                                 \
+                m.count = static_cast<std::uint32_t>(Count);                 \
                 r.members.push_back(std::move(m));                           \
             }
 

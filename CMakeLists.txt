@@ -21,7 +21,7 @@ endif()
 
 # tutorials/ is a standalone sandbox for a human to build and try
 # things out independently -- it is NOT part of this project's build.
-# See tutorials/README.md and docs/adr/0011-tests-vs-tutorials.md.
+# See tutorials/README.md and docs/adr/0011-tutorials-and-their-purpose.md.
 
 include(GNUInstallDirs)
 

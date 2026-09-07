@@ -5,7 +5,7 @@
 # Not required -- each NN_name/ subdirectory is ALSO independently
 # standalone (its own project(), its own build/): cd into any one of
 # them and run the same two commands with no other step first. See
-# docs/adr/0011-tests-vs-tutorials.md for why tutorials/ (at every
+# docs/adr/0011-tutorials-and-their-purpose.md for why tutorials/ (at every
 # level) is deliberately not wired into the root CMakeLists.txt.
 
 cmake_minimum_required(VERSION 3.20)
@@ -26,3 +26,4 @@ include("${REFLECTION_ROOT_DIR}/cmake/BuildReflectionLibrary.cmake")
 add_subdirectory(01_hello_world)
 add_subdirectory(02_auto_reflect_legacy_struct)
 add_subdirectory(03_macros_for_special_cases)
+add_subdirectory(04_dwarf_arrays)

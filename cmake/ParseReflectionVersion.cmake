@@ -8,7 +8,7 @@
 # Expects REFLECTION_ROOT_DIR to already be set (the directory
 # containing version.txt and src/). Included by both the root
 # CMakeLists.txt and tutorials/CMakeLists.txt -- see
-# docs/adr/0011-tests-vs-tutorials.md for why tutorials/ needs its own
+# docs/adr/0011-tutorials-and-their-purpose.md for why tutorials/ needs its own
 # copy of this wiring rather than being pulled in by the root build.
 
 file(STRINGS "${REFLECTION_ROOT_DIR}/version.txt" REFLECTION_VERSION_RAW LIMIT_COUNT 1)

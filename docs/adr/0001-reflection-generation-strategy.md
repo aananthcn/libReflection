@@ -1,240 +1,157 @@
 # 0001 — Reflection Generation Strategy
 
-**Status:** Decided — revised. Originally decided as macro-only; revised
-below once the real target codebase (~10,000 existing classes) made
-that untenable. This file records both the original reasoning and the
-revision in place, rather than as a separate superseding ADR, since
-it's a single question ("how does reflection metadata get generated?")
-whose answer changed as new constraints came in.
+**Status:** Decided — revised. Originally macro-only; revised once the
+real target codebase (~10,000 existing classes) made that untenable.
+Kept as one file (not a superseding ADR) since it's a single question
+— "how does reflection metadata get generated?" — whose answer changed.
 
-## Context
+## Options considered (original decision)
 
-C++20 has no reflection facilities (`^`, `std::meta`,
-`nonstatic_data_members_of`, etc. arrive in C++26). `ClassReflection`
-instances for a user's classes must therefore be populated by
-*something else*, and that something else defines how every reflected
-class in the codebase gets annotated. Three approaches were
-considered up front:
+C++20 has no reflection facilities (C++26 adds them). Three options:
 
-1. **Macro-based manual registration.** A small set of macros
-   (`REFLECT_CLASS_BEGIN`/`REFLECT_MEMBER`/`REFLECT_CLASS_END`, etc.)
-   expand into code that records each member's name, offset (`offsetof`),
-   size and type. Fully standard C++, no compiler-specific behavior, works
-   identically under GCC, Clang, and QNX's QCC toolchain (SDP 8.0).
-   Cost: every reflected class needs an explicit annotation block.
+1. **Macro-based manual registration**
+   (`REFLECT_CLASS_BEGIN`/`REFLECT_MEMBER`/...). Standard C++, portable
+   to GCC/Clang/QCC. Cost: every reflected class needs an explicit
+   annotation block.
+2. **Automatic aggregate reflection** (Boost.PFR-style): structured
+   bindings derive member shape with zero annotation; recovering member
+   *names* needs `__PRETTY_FUNCTION__` string-parsing, which is a
+   portability risk against QCC.
+3. **External code-generation tool** (libclang-based): keeps headers
+   macro-free, but adds a libclang dependency and a codegen step inside
+   the QNX SDP 8.0 cross-build — too much build-system surface area.
 
-2. **Automatic aggregate reflection (Boost.PFR-style).** Uses structured
-   bindings to derive member shape with no annotation at all, optionally
-   plus `__PRETTY_FUNCTION__` string-parsing tricks to also recover
-   member *names*. The name-recovery trick depends on the exact format
-   of compiler built-ins — a serious portability risk against QCC,
-   which is not one of the mainstream compilers such libraries are
-   validated against.
-
-3. **External code-generation tool.** A libclang-based generator parses
-   headers and emits registration `.cpp` files at build time. Keeps
-   headers macro-free, but adds a libclang dependency and a codegen step
-   that must itself be made to work inside the QNX SDP 8.0 cross-build —
-   a large increase in build-system surface area for a "minimal
-   implementation."
-
-**Original decision (superseded below):** macro-based manual
-registration, on the grounds that it's the only option that's
-portable-by-construction without compiler-specific parsing or an
-external toolchain dependency. This assumed reflection would be added
-to a modest, actively maintained set of classes.
+**Original decision:** macro-based manual registration (portable by
+construction, no external toolchain) — superseded below.
 
 ## Revision: automatic aggregate reflection is now the default
 
-That assumption broke down at the scale the user actually has: an
-existing codebase of roughly 10,000 classes, where:
+Broke down at real scale (~10,000 classes): original authors won't
+accept header changes; per-class side-car registration files (proven
+technically possible — a `TypeInfo<T>` specialization needn't live near
+`T`) still mean 10,000 hand-written files that silently drift out of
+sync whenever a member is added/removed/reordered — worse than the
+intrusiveness problem it solves. Option 2's *structural* half (member
+decomposition) is small enough to hand-roll with zero dependency,
+keeping this project's zero-dependency posture; only the *name-recovery*
+half carried the QCC risk, so that half is dropped entirely.
 
-- The original authors will not accept modifications to their headers
-  (rules out annotating the class body directly).
-- Writing a `REFLECT_CLASS_BEGIN` block in a *separate* file per class
-  (confirmed technically possible — a specialization of
-  `reflect::TypeInfo<T>` doesn't need to live anywhere near `T`'s own
-  definition) still means 10,000 hand-written files that a human must
-  create once and then keep in sync by hand forever: every time a
-  class gains, loses, renames, or reorders a member, the side-car
-  registration silently drifts unless someone remembers to update it.
-  At this scale, that maintenance burden is worse than the
-  intrusiveness problem it was meant to solve.
-- Boost (rejected as heavyweight) was never actually necessary for
-  option 2's *structural* half: the technique (structured-binding-based
-  automatic member decomposition, as used by Boost.PFR) is small enough
-  to hand-roll with zero third-party dependency, consistent with this
-  project's existing zero-dependency posture (see
-  [0007](0007-testing-strategy.md)). Only option 2's *name-recovery*
-  half carries the QCC portability risk, and that half is skipped
-  entirely (see below).
+**Revised decision:** any type with no explicit `REFLECT_CLASS_BEGIN`/
+`REFLECT_ENUM_BEGIN` gets automatic structural reflection if
+`std::is_aggregate_v<T>` (excluding unions) — zero annotation, derived
+from `T` itself:
 
-**Revised decision:** for any type with **no** explicit
-`REFLECT_CLASS_BEGIN`/`REFLECT_ENUM_BEGIN` block, `reflect::TypeInfo<T>`'s
-primary template checks `std::is_aggregate_v<T>` (excluding unions)
-and, if true, derives real structural reflection **automatically**,
-with zero annotation, as the default path:
+- **Count**: compile-time binary search for the largest N such that `T`
+  constructs from N universal placeholder arguments.
+- **Types**: structured-binding decomposition; `src/AggregateTie.generated.hpp`
+  provides one `TieMembers()` overload per N up to `kMaxAggregateFields`
+  (64), generated by `tools/generate_aggregate_tie.py` (regenerate if
+  the cap changes).
+- **Offsets**: pointer arithmetic on the bound references against a
+  value-initialized probe — not `offsetof`, so this works even where
+  `offsetof` on a non-standard-layout type would be questionable.
+- **Recursion**: a nested aggregate member is described via
+  `reflect::Reflect<MemberT>()` again, all the way down.
 
-- Member **count**, via a compile-time binary search for the largest N
-  such that `T` can be constructed from N "universal, convertible-to-
-  anything" placeholder arguments (the standard technique also used by
-  Boost.PFR).
-- Member **types**, via structured-binding decomposition
-  (`auto& [a0, a1, ...] = probe;`) — the binding count itself must be a
-  literal in source, so `src/AggregateTie.generated.hpp` mechanically
-  provides one `TieMembers()` overload per N up to
-  `kMaxAggregateFields` (64), generated by
-  `tools/generate_aggregate_tie.py` (regenerate after changing the
-  cap).
-- Member **offsets**, via pointer arithmetic on the bound references
-  against a value-initialized probe instance — not `offsetof`, so this
-  works even where `offsetof` on a non-standard-layout type would be
-  questionable.
-- **Recursion**: a nested aggregate member is described by calling
-  `reflect::Reflect<MemberT>()` again, so nested unregistered structs
-  get auto-reflected too, all the way down.
+## `REFLECT_CLASS_BEGIN`: the escape hatch, not the final answer
 
-`REFLECT_CLASS_BEGIN` remains available and still takes priority (it's
-a full specialization of the same `TypeInfo<T>` template). **This is
-not being presented as the accepted final answer for any of these
-cases** — writing it by hand is exactly the manual-annotation burden
-this whole project exists to eliminate, and it is being actively
-eliminated, case by case, not left as a permanent requirement:
+Still available (a full `TypeInfo<T>` specialization, takes priority).
+Each remaining case below is something being actively eliminated, not
+accepted as permanent:
 
-- **Enums, always** (today). Enums are never aggregates, so there is
-  no standard way to enumerate an enum's named values automatically
-  from a compiled type. `REFLECT_ENUM_BEGIN` is the current fallback.
-  [0013](0013-dwarf-based-reflection-generation.md)'s DWARF pipeline
-  doesn't cover enums yet either (its type-discovery scan only matches
-  `struct`/`class`), but there's no fundamental blocker — DWARF records
-  an enum's named values directly (`DW_TAG_enumeration_type`/
-  `DW_TAG_enumerator`), same as it does struct members; see that ADR's
-  "Future work" section.
-- **Types with a direct fixed-size C-array member** (e.g.
-  `int flags[3];`) — see the unsupported-shapes list below for why
-  automatic reflection alone can't count them. Today's DWARF pipeline
-  doesn't correctly resolve an array member either — worse, it
-  currently emits a silently wrong size (`0`) rather than abstaining,
-  a real bug tracked in [0013](0013-dwarf-based-reflection-generation.md)'s
-  "Known open risks" — so `REFLECT_CLASS_BEGIN` remains required for
-  this case for now, not by design.
+- **Enums, always.** No standard way to enumerate an enum's named
+  values from a compiled type. [0013](0013-dwarf-based-reflection-generation.md)
+  doesn't cover this yet either (its scan only matches `struct`/`class`),
+  but DWARF records enum values directly, so there's no fundamental
+  blocker — see that ADR's "Future work".
+- **A direct fixed-size C-array member — only for the plain
+  automatic-aggregate path** (see "Unsupported shapes" below for why).
+  A project already using [0013](0013-dwarf-based-reflection-generation.md)'s
+  DWARF pipeline doesn't need this fallback any more (fixed after a
+  real bug — see that ADR's "Fixed bugs").
 - **Non-aggregates — private members, user-declared constructors,
-  virtual functions.** This is the case [0013](0013-dwarf-based-reflection-generation.md)
-  exists specifically to eliminate: DWARF debug info exposes a
-  private member's name/type/offset regardless of C++ access control,
-  so a type in this category should not need `REFLECT_CLASS_BEGIN`
-  (or any change to its own source) once that mechanism is built.
-  Until then, `REFLECT_CLASS_BEGIN` (with a `friend` declaration for
-  private members) is the only working fallback — a real, intrusive
-  cost, not an acceptable steady state.
-- **When real member/type names are needed**, or when two distinct
-  types must never be confused with each other by hash (see the
-  identity caveat below) — automatic reflection can't provide either;
-  [0013](0013-dwarf-based-reflection-generation.md) is expected to
-  close this gap too, since it reads the real names directly.
+  virtual functions.** [0013](0013-dwarf-based-reflection-generation.md)
+  exists specifically to eliminate this: DWARF exposes a private
+  member's name/type/offset regardless of access control, with no
+  source change. Until adopted, `REFLECT_CLASS_BEGIN` + a `friend`
+  declaration is the only fallback — a real, intrusive cost.
+- **Real names, or distinguishing two same-shaped types by hash** —
+  automatic reflection can't provide either;
+  [0013](0013-dwarf-based-reflection-generation.md) closes this gap
+  too, by reading the real names directly.
 
 ## What automatic reflection cannot recover (fundamental, not a gap)
 
-Nothing in a compiled C++ program records a data member's source
-identifier — it's erased at compile time, with no ABI-level or
-standard mechanism to get it back short of the `__PRETTY_FUNCTION__`
-string-parsing hack rejected above for QNX/QCC portability reasons. So:
+No compiled C++ program retains a data member's source identifier —
+erased at compile time, no standard way to get it back short of the
+QCC-unsafe `__PRETTY_FUNCTION__` trick. So auto-reflected types get
+`type`/`name` = `"<aggregate>"`, and members get positional names
+(`"field0"`, `"field1"`, ...). Real names require `REFLECT_CLASS_BEGIN`
+(possible non-intrusively via a side-car file only when members are
+public — see [0013](0013-dwarf-based-reflection-generation.md) for the
+common, encapsulated case, and [0012](0012-generated-reflection-names.md)
+for an automated alternative that was tried and reverted).
 
-- Auto-reflected types get `type`/`name` = `"<aggregate>"`.
-- Auto-reflected members get positional names: `"field0"`, `"field1"`, ...
+**Type-identity caveat** ([0002](0002-class-hash-algorithm-and-purpose.md)):
+every auto-reflected type shares the literal name `"<aggregate>"`, so
+`ClassHash` is purely structural for them — two independently-defined,
+same-layout structs get an **identical** hash despite being different
+types. `reflect::FindByName` is a no-op for auto-reflected types for
+the same reason (`FindByHash`/compile-time `Reflect<T>()` still work).
+Give a shared-memory message type a real name via `REFLECT_CLASS_BEGIN`
+if its identity, not just its layout, must be distinguishable.
 
-If human-readable names matter for a given type, it needs an explicit
-`REFLECT_CLASS_BEGIN` block (which can still live in a separate,
-non-intrusive file, per the earlier proof — though that non-intrusive
-route only works when members are public; see
-[0013](0013-dwarf-based-reflection-generation.md) for the encapsulated
-case, which is the common one in practice, and
-[0012](0012-generated-reflection-names.md) for an automated,
-text-scanning alternative that was tried and reverted because it only
-ever helped the less-common already-public case).
+## Unsupported shapes — a compile error, never silently wrong data
 
-**Type-identity caveat for the shared-memory IPC use case
-([0009](0009-versioning-and-hash-purpose.md)):** because every
-auto-reflected type shares the literal name `"<aggregate>"`,
-`ClassHash` is purely *structural* for these types — two independently
-defined structs with the same field layout (e.g. two different
-message types that both happen to be `{int a; int b;}`) get an
-**identical** hash under automatic reflection, even though they are
-different types. `reflect::FindByName` is a no-op for auto-reflected
-types for the same reason (see "Consequences" below) — only
-`reflect::FindByHash` and compile-time `reflect::Reflect<T>()` resolve
-them. If a shared-memory message type's identity (not just its layout)
-must be distinguishable from other same-shaped types, give it a real
-name via `REFLECT_CLASS_BEGIN`, so the real name participates in the
-hash instead of the shared `"<aggregate>"` sentinel.
-
-## Known unsupported shapes — a compile error, never silently wrong data
-
-- **More than 64 members**: a `static_assert` fires by design (raise
-  `kMaxAggregateFields` in `AggregateReflection.hpp` and regenerate the
-  tie header if a real class needs more).
-- **Any direct fixed-size C-array member** (e.g. `int flags[3];`).
-  This was discovered empirically while building this feature, and is
-  worth recording precisely because it's non-obvious: the member-count
-  probe works by testing how many placeholder arguments `T` accepts.
-  A nested *class* member is always filled as a single whole
-  placeholder (verified: both brace-init and C++20 parenthesized
-  aggregate-init, P0960, agree on the count for class members, however
-  deeply nested). An array member is different — a conversion operator
-  can never return an array type, so brace-init's elision rules and
-  paren-init's no-elision rules disagree about how many placeholders
-  an array member consumes. We compute the count both ways and
-  `static_assert` they agree; for a type with a direct array member,
-  they don't, and the type must use `REFLECT_CLASS_BEGIN` instead
-  (which supports fixed-size arrays natively, see
-  [0004](0004-member-representation-scope.md)).
-- **Empty aggregates** (`struct Empty {};`) are handled as a dedicated
-  special case (`std::is_empty_v<T>` → 0 members) rather than through
-  the general probe, because `T{u}` for a single placeholder argument
-  on an empty aggregate resolves as copy-initialization (`u` converts
-  to `T` as a whole) rather than "too many initializers for 0
-  members" — another non-obvious result found empirically that would
-  otherwise have made the brace/paren counts spuriously disagree.
-- **Bit-field members**: computing an offset requires taking the
-  member's address, which is ill-formed for a bit-field. Such a type
-  fails to compile through this path — use `REFLECT_CLASS_BEGIN`.
+- **More than 64 members**: `static_assert` fires by design (raise
+  `kMaxAggregateFields` and regenerate the tie header).
+- **A direct fixed-size C-array member**: the count probe relies on
+  brace-init and C++20 paren-init (P0960) agreeing on how many
+  placeholder arguments `T` accepts. They always agree for a nested
+  class member (whole-object placeholder either way), but not for an
+  array member — no conversion operator can return an array type, so
+  brace-init's elision rules and paren-init's no-elision rules disagree
+  on the count. Both are computed and `static_assert`'d equal; a
+  mismatch means an array member, and the type must use
+  `REFLECT_CLASS_BEGIN` (which supports fixed-size arrays natively via
+  `decltype`/`offsetof` — see [0004](0004-member-representation-scope.md)).
+- **Empty aggregates** (`struct Empty {};`): handled as a dedicated
+  `std::is_empty_v<T>` → 0-members special case, not the general probe
+  — a single placeholder argument on an empty aggregate resolves as
+  whole-object copy-initialization, not "too many initializers," which
+  would otherwise make the brace/paren counts spuriously disagree.
+- **Bit-field members**: an offset requires the member's address, which
+  is ill-formed for a bit-field — fails to compile; use
+  `REFLECT_CLASS_BEGIN`.
 
 ## Consequences
 
-- Existing/legacy structs (plain data, public members — exactly the
-  shape shared-memory IPC structs already need per
-  [0009](0009-versioning-and-hash-purpose.md)) get real offset/size/
-  count reflection, and correct hash sensitivity to layout changes,
-  with **zero files created or modified**, and **nothing to maintain**
-  — the description is recomputed from the live type on every build.
-- The 10,000-class scenario: annotate nothing by default for plain
-  aggregates. Non-aggregate types (private members, constructors) are
-  **not** a minority case in a real legacy codebase — ordinary
-  encapsulation is the typical shape of a hand-written C++ class (see
-  [0012](0012-generated-reflection-names.md)'s revert notice, which
-  corrects an earlier, wrong claim that plain aggregates were
-  representative). `REFLECT_CLASS_BEGIN` is today's fallback for that
-  case, but it requires a `friend` declaration for private members —
-  an intrusive source change this project's stated goal rules out.
+- Existing/legacy plain-data public-member structs — exactly the shape
+  a shared-memory IPC struct needs per
+  [0002](0002-class-hash-algorithm-and-purpose.md) — get real
+  offset/size/count reflection and correct hash sensitivity with
+  **zero files created or modified**: recomputed from the live type on
+  every build.
+- Non-aggregate types (private members, constructors) are **not** a
+  minority case in a real legacy codebase — ordinary encapsulation is
+  typical (see [0012](0012-generated-reflection-names.md)'s revert,
+  which corrects an earlier wrong claim otherwise).
+  `REFLECT_CLASS_BEGIN` + `friend` is today's intrusive fallback;
   [0013](0013-dwarf-based-reflection-generation.md) is the active
-  effort to eliminate that requirement entirely, for exactly this,
-  most-common case.
-- The global registry (`reflect::FindByName`/`FindByHash`,
-  [0008](0008-thread-safety-and-registry.md)) skips inserting
-  auto-reflected types into the by-name map at all (their shared
-  `"<aggregate>"` name would otherwise silently collide across
-  unrelated types) — `FindByName` only ever resolves macro-registered
-  types. `FindByHash` still works for both.
-- `docs/adr/0004-member-representation-scope.md`'s "any unregistered
-  type is an opaque leaf" statement is now only true for *non-aggregate*
-  unregistered types (pointers, unregistered enums, private-member
-  classes); unregistered aggregates get the richer treatment described
-  here.
-- `offsetof`-based member offsets (macro path only — the automatic
-  path uses pointer arithmetic instead, see above) require the
-  reflected class to behave like a standard-layout type in practice
-  (no virtual bases). Plain structs, and classes with a single
-  non-virtual inheritance chain under the Itanium C++ ABI (used by
-  both Linux and QNX), are fine; classes with virtual bases are out of
-  scope and should be flagged, not silently mis-reflected — see
+  effort to eliminate that requirement for exactly this, most-common
+  case.
+- The global registry ([0008](0008-thread-safety-and-registry.md))
+  skips inserting auto-reflected types into the by-name map (their
+  shared `"<aggregate>"` name would collide across unrelated types) —
+  `FindByName` only ever resolves macro-registered types; `FindByHash`
+  works for both.
+- [0004](0004-member-representation-scope.md)'s "any unregistered type
+  is an opaque leaf" now only holds for *non-aggregate* unregistered
+  types; unregistered aggregates get the richer treatment above.
+- `offsetof`-based member offsets (macro path only — the automatic path
+  uses pointer arithmetic instead) require standard-layout-like
+  behavior in practice: fine for plain structs and single non-virtual
+  inheritance chains under the Itanium C++ ABI (Linux and QNX both use
+  it); classes with virtual bases are out of scope and should be
+  flagged, not silently mis-reflected — see
   [0004](0004-member-representation-scope.md).

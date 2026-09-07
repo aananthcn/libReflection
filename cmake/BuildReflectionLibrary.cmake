@@ -7,7 +7,7 @@
 # individual tutorials/NN_name/CMakeLists.txt (build just that one, cd
 # in and `cmake -S . -B build` with no other step first -- a tutorial
 # is a place to build and try things out independently, all the way
-# down to a single example; see docs/adr/0011-tests-vs-tutorials.md).
+# down to a single example; see docs/adr/0011-tutorials-and-their-purpose.md).
 # Keeping the library-build logic in one shared file means there's only
 # one place to update if it ever changes.
 #
@@ -24,6 +24,18 @@ if(NOT TARGET Reflection)
         "${REFLECTION_ROOT_DIR}/src/Version.hpp.in"
         "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.hpp"
         @ONLY)
+
+    # Recorded so other modules that need this exact directory (e.g.
+    # GenerateDwarfReflection.cmake's extraction-driver compile, which
+    # can't just guess "${CMAKE_CURRENT_BINARY_DIR}/generated" itself --
+    # that guess is wrong whenever it runs from a DIFFERENT directory
+    # scope than this file was include()'d from, which happens for
+    # tutorials/'s aggregator build (this file is include()'d once at
+    # tutorials/CMakeLists.txt's scope, but
+    # reflection_generate_dwarf() runs from each
+    # tutorials/NN_name/CMakeLists.txt's own subdirectory scope) --
+    # can reference the real path instead of re-deriving it.
+    set(REFLECTION_GENERATED_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
     add_library(Reflection STATIC
         "${REFLECTION_ROOT_DIR}/src/ClassReflection.cpp"

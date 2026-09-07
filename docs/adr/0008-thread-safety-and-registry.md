@@ -1,6 +1,27 @@
 # 0008 — Registry & Thread-Safety Model
 
-**Status:** Decided
+**Status:** Decided. Re-checked against
+[0013](0013-dwarf-based-reflection-generation.md)'s DWARF pipeline
+(added after this ADR) — **still fully valid, no changes needed.**
+`Reflect<T>()` (`src/TypeInfo.hpp`) is one shared template function
+that doesn't know or care which mechanism populated
+`TypeInfo<T>::Describe()` — hand-written `REFLECT_CLASS_BEGIN`,
+DWARF-generated `REFLECT_DWARF_CLASS_BEGIN`, or the automatic-aggregate
+fallback all go through the exact same magic-statics caching and the
+exact same mutex-guarded `RegisterInGlobalRegistry()`
+(`src/ReflectionRegistry.cpp`) with no special-casing. A
+DWARF-registered type sets `r.name` to the real class name (not the
+`kAutoAggregateTypeName` sentinel that suppresses by-name
+registration), so it's indexed by both hash and name exactly like a
+macro-registered type — confirmed by `tutorials/01_hello_world`'s
+`FindByName("HelloWorld")` resolving correctly. One honest caveat, not
+a defect in this ADR's model: if a type hits
+[0013](0013-dwarf-based-reflection-generation.md)'s known
+virtual-base-class bug (silently resolves to zero members), that wrong
+`ClassReflection` gets registered and cached via this exact same,
+correctly-functioning plumbing — this registry does precisely what
+it's designed to do with whatever `Describe()` hands it; the fix
+belongs in 0013, not here.
 
 ## Context
 

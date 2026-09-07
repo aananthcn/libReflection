@@ -42,13 +42,10 @@ mechanically, or whether the given tree is exhaustive.
   their own toolchain file instead (a different SDP version, a
   different target) as long as it follows the same GNU-triple
   convention; README.md documents both paths.
-- **`version.txt`** holds a bare `MAJOR.MINOR.PATCH` version string
-  (e.g. `0.1.0` — no `v` prefix, per user confirmation), the single
-  source of truth for the library's version. `CMakeLists.txt` reads it
-  via `file(STRINGS ...)` and requires an exact `^[0-9]+\.[0-9]+\.[0-9]+$`
-  match (`FATAL_ERROR` otherwise) to feed `project(Reflection VERSION ...)`;
-  the same string is also embedded verbatim as `reflect::kVersionString`
-  for display/telemetry.
+- **`version.txt`** — format, parsing, and CMake wiring are documented
+  in [0009](0009-library-versioning.md), which owns
+  everything about this file (kept in one place rather than duplicated
+  here, since 0009 is specifically the ADR about versioning).
 - **`release/`** is a source-tracked folder for release-specific
   **scripts and documents**, plus the destination for packaged release
   **artifacts** (binaries). It is not merely a CMake
@@ -63,12 +60,12 @@ mechanically, or whether the given tree is exhaustive.
     library at all; see [0007](0007-testing-strategy.md).
   - `tutorials/` — numbered example applications, kept separate from
     `tests/` *and built as its own standalone CMake project*, not part
-    of this build at all; see [0011](0011-tests-vs-tutorials.md) for why.
+    of this build at all; see [0011](0011-tutorials-and-their-purpose.md) for why.
   - `cmake/` — `ParseReflectionVersion.cmake`/`BuildReflectionLibrary.cmake`,
     the shared modules both this `CMakeLists.txt` and
     `tutorials/CMakeLists.txt` include so "how to build libReflection"
     has one definition despite being two independent top-level
-    projects; see [0011](0011-tests-vs-tutorials.md). Also
+    projects; see [0011](0011-tutorials-and-their-purpose.md). Also
     `GenerateDwarfReflection.cmake` (the [0013](0013-dwarf-based-reflection-generation.md)
     pipeline) and `qnx-toolchain.cmake` (the vendored QNX SDP 8.0
     reference toolchain file, see above). (A now-removed module,
@@ -84,8 +81,27 @@ mechanically, or whether the given tree is exhaustive.
 ## Consequences
 
 - Anyone building for QNX needs SDP 8.0 installed and its environment
-  sourced; this library adds no QNX-specific CMake logic of its own
-  beyond being toolchain-file-agnostic C++20.
+  sourced.
+- **The library itself (`libReflection.a`, `tests/`) remains
+  toolchain-file-agnostic C++20** — the root `CMakeLists.txt` never
+  calls `reflection_generate_dwarf()`, so building/testing the library
+  proper doesn't care how the toolchain file names its compiler. This
+  part of the original "no QNX-specific CMake logic" claim still holds.
+  It no longer holds project-wide, though: **a project that opts into
+  [0013](0013-dwarf-based-reflection-generation.md)'s DWARF pipeline
+  (as `tutorials/01_hello_world` and `tutorials/04_dwarf_arrays` do)
+  takes on a real, QNX-specific constraint** — the toolchain file's
+  compiler must be named in GNU-triple form (see the vendored
+  `cmake/qnx-toolchain.cmake` above) for `CMAKE_OBJDUMP` to resolve to
+  the correct target's `objdump` rather than silently falling back to
+  the host's. This is genuine, non-obvious QNX-specific CMake logic
+  this library now has, contrary to what this section originally said;
+  see [0013](0013-dwarf-based-reflection-generation.md)'s "Verified"
+  section for how this was found.
+- Verified, not just designed: [0013](0013-dwarf-based-reflection-generation.md)'s
+  DWARF pipeline was built, tested, cross-compiled, **and actually
+  executed** (not merely format-checked) on a real QNX 8.0 aarch64
+  device — see that ADR's "Verified" section.
 - The four additive folders (`tests/`, `tutorials/`, `cmake/`, `docs/`) don't
   conflict with anything ARCHITECTURE.md's tree names — they're pure
   additions, called out here so they don't read as scope creep later.

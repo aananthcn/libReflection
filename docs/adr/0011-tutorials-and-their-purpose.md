@@ -1,40 +1,23 @@
-# 0011 — `tests/` vs. `tutorials/`
+# 0011 — Tutorials and Their Purpose
 
 **Status:** Decided; revised twice — `tutorials/` is now a fully
 standalone CMake project, not built by the root project at all, and
 **each individual tutorial is independently standalone too** (see
-"Revision" and "Second revision" below).
+"Revision" and "Second revision" below). Formerly titled
+"`tests/` vs. `tutorials/`"; the content specific to `tests/` (what it
+is, why it's scoped the way it is, and the shared naming history with
+`tutorials/`) now lives in [0007](0007-testing-strategy.md), the ADR
+actually about testing strategy, leaving this file for `tutorials/`
+alone — see 0007's Context for why these two needed separate,
+visibly-distinct homes in the first place.
 
 ## Context
 
-Two different things needed a home: an automated unit-test suite
-(offset/hash/enum/registry assertions, run via `ctest`) and numbered,
-runnable example applications demonstrating the library end to end
-(the "hello world" of using libReflection, with more complex scenarios
-to follow as `02_xxx`, `03_xxx`, ...).
-
-These were first split into a similarly-named `test/` (examples) vs.
-`tests/` (unit suite) pair, which in practice was too easy to confuse —
-files ended up merged into the wrong one, and folders had to be
-untangled more than once before landing here.
-
-## Decision
-
-- **`tests/`** is exactly one thing: the flat `ReflectionTests`
-  unit-test suite (`test_main.cpp`, `test_*.cpp`, `TestFramework.hpp`).
-  Not numbered, no subfolders. See
-  [0007](0007-testing-strategy.md). It is part of the root project's
-  build — anyone building the library gets it built and registered
-  with `ctest` automatically (`REFLECTION_BUILD_TESTS`, default ON).
-- **`tutorials/`** holds the numbered example applications
-  (`01_hello_world/`, `02_...`, ...), each its own standalone
-  executable. See `tutorials/README.md`.
-
-`tutorials/` was chosen specifically because it can't be confused with
-`tests/` by a near-identical name — unlike the earlier `test/`/`tests/`
-pair, there's no plural/singular distinction to misread or mistype.
-
-## Revision: `tutorials/` is a standalone project, not part of the root build
+`tutorials/` holds numbered, runnable example applications
+demonstrating the library end to end (the "hello world" of using
+libReflection, and onward as `02_xxx`, `03_xxx`, ...) — a place a human
+builds and tries things out, distinct from [0007](0007-testing-strategy.md)'s
+automated `ReflectionTests` unit suite.
 
 Originally `tutorials/` was wired into the root `CMakeLists.txt` via
 `add_subdirectory(tutorials)`, the same way `tests/` is. This was
@@ -49,6 +32,14 @@ directly (`cd tutorials/01_hello_world && cmake ..`), which failed —
 `01_hello_world/CMakeLists.txt` had no `project()` call and no idea
 where the library's headers lived, because it had only ever been
 designed to be pulled in by the root project.
+
+## Decision
+
+`tutorials/` holds the numbered example applications
+(`01_hello_world/`, `02_...`, ...), each its own standalone executable.
+See `tutorials/README.md`.
+
+## Revision: `tutorials/` is a standalone project, not part of the root build
 
 **Revised decision:** `tutorials/` is now its own independent,
 self-contained CMake project:
@@ -112,13 +103,14 @@ with `ReflectionTutorials` or with each other by name.
 Verified all three usage modes still work after this change: the root
 project, `tutorials/` building all three at once, and each
 `tutorials/NN_name/` built completely on its own from its own nested
-`build/` directory.
+`build/` directory. (Also re-verified later, when a fourth tutorial —
+`04_dwarf_arrays` — was added: see
+[0013](0013-dwarf-based-reflection-generation.md)'s "Fixed bugs" for a
+real cmake include-path bug this exact three-level structure surfaced,
+unrelated to this ADR's own decisions but found by exercising them.)
 
 ## Consequences
 
-- No file should ever need to move between `tests/` and `tutorials/`
-  based on a naming mixup — they now serve visibly different purposes
-  (verification vs. demonstration), not just similarly-named folders.
 - Building the library (`cmake -S . -B build` at the repo root) never
   builds tutorials as a side effect, and building/trying out a
   tutorial — the whole `tutorials/` folder, or just one example — never
@@ -126,5 +118,5 @@ project, `tutorials/` building all three at once, and each
   Each of the three levels (root, `tutorials/`, `tutorials/NN_name/`)
   is independently `cmake -S . -B build`-able on its own.
 - `cmake/` is a new additive top-level folder (see
-  [0006](0006-build-system-and-qnx-portability.md)), holding the two
-  shared modules every one of those independent projects includes.
+  [0006](0006-build-system-and-qnx-portability.md)), holding the shared
+  modules every one of those independent projects includes.

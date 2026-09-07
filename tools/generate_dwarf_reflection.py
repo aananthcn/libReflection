@@ -187,9 +187,23 @@ def dump_dwarf(object_path: str, objdump: str = "objdump") -> str:
 
 
 def parse_name(raw: str) -> str:
+    """objdump sometimes wraps a name as
+    "(indirect string, offset: 0x...): <name>" -- strip that prefix by
+    finding the literal "): " delimiter that ends it, NOT by splitting
+    on the last ":" in the whole string. The real <name> can itself
+    contain "::" (any namespace-qualified type, e.g.
+    "basic_string<char, std::char_traits<char>, std::allocator<char> >"
+    for std::string) -- rsplit(":", 1) used to grab whatever followed
+    the LAST "::" inside the name instead of the actual name, silently
+    truncating it (e.g. to "allocator<char> >"). Verified against a
+    real std::vector<int>/std::string member -- see
+    docs/adr/0013-dwarf-based-reflection-generation.md."""
     raw = raw.strip()
-    if raw.startswith("(") and ":" in raw:
-        return raw.rsplit(":", 1)[-1].strip()
+    if raw.startswith("("):
+        marker = "): "
+        idx = raw.find(marker)
+        if idx != -1:
+            return raw[idx + len(marker):].strip()
     return raw
 
 
@@ -221,46 +235,111 @@ def parse_dies(dwarf_text: str):
     return dies
 
 
-def resolve_type(offset, by_offset, _seen=None):
-    """Returns (type_name, byte_size) for a DW_AT_type reference,
-    unwrapping const/volatile/typedef qualifiers. Pointers are named
-    "<inner>*" without recursing into the pointee's members (matches
-    docs/adr/0004's opaque-leaf policy for pointers). Anything
-    unresolvable becomes ("<unknown>", 0) rather than a guess."""
+def _array_dimensions(array_offset, dies, offset_to_index):
+    """Returns the dimension sizes of a DW_TAG_array_type DIE at
+    array_offset (e.g. [3] for int[3], [3, 4] for int[3][4]), read from
+    its direct DW_TAG_subrange_type children -- DW_AT_count if present,
+    else DW_AT_upper_bound (0-based, so +1). Returns None if any
+    dimension's size can't be determined (e.g. an unbounded array),
+    so the caller can abstain instead of guessing."""
+    idx = offset_to_index.get(array_offset)
+    if idx is None:
+        return None
+    depth = dies[idx]["depth"]
+    dims = []
+    j = idx + 1
+    while j < len(dies) and dies[j]["depth"] > depth:
+        child = dies[j]
+        if child["depth"] == depth + 1 and child["tag"] == "DW_TAG_subrange_type":
+            attrs = child["attrs"]
+            try:
+                if "DW_AT_count" in attrs:
+                    dims.append(int(attrs["DW_AT_count"], 0))
+                elif "DW_AT_upper_bound" in attrs:
+                    dims.append(int(attrs["DW_AT_upper_bound"], 0) + 1)
+                else:
+                    return None
+            except ValueError:
+                return None
+        j += 1
+    return dims if dims else None
+
+
+def resolve_type(offset, dies, by_offset, offset_to_index, _seen=None):
+    """Returns (type_name, byte_size, count) for a DW_AT_type reference,
+    unwrapping const/volatile/typedef qualifiers. count is 1 for
+    everything except a fixed-size array, where it's the real element
+    count (see below) -- this is what lets REFLECT_DWARF_MEMBER's
+    Count argument be correct instead of the historical hardcoded 1.
+    Pointers are named "<inner>*" without recursing into the pointee's
+    members (matches docs/adr/0004's opaque-leaf policy for pointers).
+    A fixed-size array resolves to "<elem>[N]" (or "<elem>[N][M]" for
+    multiple dimensions) with the correct total byte size and total
+    element count -- GCC does not reliably emit DW_AT_byte_size on the
+    array type DIE itself, so both are computed from the element type's
+    size times each DW_TAG_subrange_type child's count via
+    _array_dimensions(). (This used to fall through to the generic
+    branch below, which has no DW_AT_name for an array type DIE and so
+    silently returned ("<unknown>", 0) -- a real fixed-size array
+    member's SIZE, not just its name, reported as 0; see docs/adr/0013's
+    "Known open risks" for how this was found.) Anything unresolvable --
+    including an array whose dimension can't be determined -- becomes
+    ("<unknown>", 0, 0) rather than a guess; find_type() treats that
+    sentinel as "skip this member, don't emit wrong data"."""
     if _seen is None:
         _seen = set()
     if offset is None or offset in _seen:
-        return ("<unknown>", 0)
+        return ("<unknown>", 0, 0)
     _seen.add(offset)
     die = by_offset.get(offset)
     if die is None:
-        return ("<unknown>", 0)
+        return ("<unknown>", 0, 0)
     tag = die["tag"]
     attrs = die["attrs"]
     if tag == "DW_TAG_base_type" or tag in TYPE_DIE_TAGS:
         name = parse_name(attrs.get("DW_AT_name", "<unknown>"))
         size = int(attrs.get("DW_AT_byte_size", "0") or 0)
-        return (name, size)
+        return (name, size, 1)
     if tag == "DW_TAG_pointer_type":
-        inner_name, _ = resolve_type(parse_ref(attrs.get("DW_AT_type", "")), by_offset, _seen)
-        return (f"{inner_name}*", 8)
+        inner_name, _, _ = resolve_type(
+            parse_ref(attrs.get("DW_AT_type", "")), dies, by_offset, offset_to_index, _seen
+        )
+        return (f"{inner_name}*", 8, 1)
+    if tag == "DW_TAG_array_type":
+        elem_name, elem_size, _ = resolve_type(
+            parse_ref(attrs.get("DW_AT_type", "")), dies, by_offset, offset_to_index, _seen
+        )
+        dims = _array_dimensions(offset, dies, offset_to_index)
+        if elem_name == "<unknown>" or elem_size == 0 or dims is None:
+            return ("<unknown>", 0, 0)
+        total_count = 1
+        for d in dims:
+            total_count *= d
+        suffix = "".join(f"[{d}]" for d in dims)
+        return (f"{elem_name}{suffix}", elem_size * total_count, total_count)
     if tag in ("DW_TAG_const_type", "DW_TAG_volatile_type", "DW_TAG_typedef"):
         inner_ref = parse_ref(attrs.get("DW_AT_type", ""))
         if inner_ref is None:
-            return ("void", 0)
-        return resolve_type(inner_ref, by_offset, _seen)
+            return ("void", 0, 1)
+        return resolve_type(inner_ref, dies, by_offset, offset_to_index, _seen)
     name = parse_name(attrs.get("DW_AT_name", "<unknown>"))
     size = int(attrs.get("DW_AT_byte_size", "0") or 0)
-    return (name, size)
+    return (name, size, 1)
 
 
 def find_type(type_name: str, dies, by_offset):
-    """Returns (byte_size, [(member_name, member_type, offset, size), ...])
+    """Returns (byte_size, [(member_name, member_type, offset, size, count), ...], skipped_names)
     for the first structure/class DIE named type_name, or None if not
     found. Only DIRECT DW_TAG_member children are collected -- methods,
     constructors, and nested types (any other tag) are skipped, and
     grandchildren (e.g. a constructor's formal parameters) are walked
-    past via depth tracking without being mistaken for members."""
+    past via depth tracking without being mistaken for members. A
+    member whose type resolve_type() couldn't confidently resolve (its
+    "<unknown>" sentinel) is left out of the member list entirely --
+    its name is returned in skipped_names instead, so the caller can
+    note it was omitted rather than silently emit wrong offset/size
+    data for it."""
+    offset_to_index = {d["offset"]: i for i, d in enumerate(dies)}
     for i, die in enumerate(dies):
         if die["tag"] not in TYPE_DIE_TAGS:
             continue
@@ -270,6 +349,7 @@ def find_type(type_name: str, dies, by_offset):
         depth = die["depth"]
         byte_size = int(die["attrs"].get("DW_AT_byte_size", "0") or 0)
         members = []
+        skipped = []
         j = i + 1
         while j < len(dies) and dies[j]["depth"] > depth:
             child = dies[j]
@@ -277,11 +357,14 @@ def find_type(type_name: str, dies, by_offset):
                 mname = parse_name(child["attrs"].get("DW_AT_name", ""))
                 moffset = int(child["attrs"].get("DW_AT_data_member_location", "0") or 0)
                 type_ref = parse_ref(child["attrs"].get("DW_AT_type", ""))
-                mtype, msize = resolve_type(type_ref, by_offset)
+                mtype, msize, mcount = resolve_type(type_ref, dies, by_offset, offset_to_index)
                 if mname:
-                    members.append((mname, mtype, moffset, msize))
+                    if mtype == "<unknown>":
+                        skipped.append(mname)
+                    else:
+                        members.append((mname, mtype, moffset, msize, mcount))
             j += 1
-        return byte_size, members
+        return byte_size, members, skipped
     return None
 
 
@@ -311,11 +394,15 @@ def extract(object_path: str, source_path: str, output_path: Path, objdump: str 
         if result is None:
             lines.append(f"// {type_name}: not found in DWARF info -- skipped, not guessed.")
             continue
-        byte_size, members = result
+        byte_size, members, skipped = result
         lines.append(f"REFLECT_DWARF_CLASS_BEGIN({type_name}, {byte_size})")
-        for mname, mtype, moffset, msize in members:
+        for mname, mtype, moffset, msize, mcount in members:
             lines.append(
-                f'    REFLECT_DWARF_MEMBER("{mname}", "{mtype}", {moffset}, {msize})'
+                f'    REFLECT_DWARF_MEMBER("{mname}", "{mtype}", {moffset}, {msize}, {mcount})'
+            )
+        for mname in skipped:
+            lines.append(
+                f"    // {mname}: type not resolved in DWARF info -- skipped, not guessed."
             )
         lines.append("REFLECT_DWARF_CLASS_END()")
         lines.append("")

@@ -35,7 +35,20 @@
 # automatically on first configure so this never fails to compile
 # before extraction has run once.
 #
-# Expects REFLECTION_ROOT_DIR to already be set.
+# CAUTION: because step 2 #includes SOURCE verbatim, SOURCE itself must
+# not call reflect::Reflect<T>() for a type automatic aggregate
+# reflection would hard-fail to compile (e.g. one with a direct array
+# member) -- the driver's bootstrap compile (before the generated
+# header has real content) falls back to that primary template, not
+# the DWARF specialization. See docs/adr/0013's "Known open risks" and
+# tutorials/04_dwarf_arrays, which keeps array-containing type
+# definitions in a separate header with no reflect::Reflect<T>() calls
+# in it, precisely to avoid this.
+#
+# Expects REFLECTION_ROOT_DIR to already be set, and
+# BuildReflectionLibrary.cmake to have already been include()'d (which
+# sets REFLECTION_GENERATED_INCLUDE_DIR, needed below) and defined the
+# Reflection target.
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
@@ -43,6 +56,10 @@ function(reflection_generate_dwarf)
     cmake_parse_arguments(ARG "" "TARGET;SOURCE" "" ${ARGN})
     if(NOT ARG_TARGET OR NOT ARG_SOURCE)
         message(FATAL_ERROR "reflection_generate_dwarf() requires TARGET and SOURCE")
+    endif()
+    if(NOT REFLECTION_GENERATED_INCLUDE_DIR)
+        message(FATAL_ERROR "reflection_generate_dwarf() requires BuildReflectionLibrary.cmake "
+                             "to be include()'d first (it sets REFLECTION_GENERATED_INCLUDE_DIR)")
     endif()
 
     set(script "${REFLECTION_ROOT_DIR}/tools/generate_dwarf_reflection.py")
@@ -67,7 +84,7 @@ function(reflection_generate_dwarf)
         OUTPUT "${extraction_obj}"
         COMMAND "${CMAKE_CXX_COMPILER}" -std=c++20 -g -gdwarf-4
                 -I "${REFLECTION_ROOT_DIR}/src" -I "${CMAKE_CURRENT_BINARY_DIR}"
-                -I "${CMAKE_CURRENT_BINARY_DIR}/generated"
+                -I "${REFLECTION_GENERATED_INCLUDE_DIR}"
                 -c "${driver_cpp}" -o "${extraction_obj}"
         DEPENDS "${driver_cpp}"
         COMMENT "Compiling ${ARG_SOURCE} with debug info for DWARF extraction"

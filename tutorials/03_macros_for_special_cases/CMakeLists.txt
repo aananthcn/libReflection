@@ -1,7 +1,7 @@
 # Fully standalone: cd into this directory and
 #   cmake -S . -B build && cmake --build build
 # works with no other step first -- no need to configure/build the
-# root project or tutorials/ first. See docs/adr/0011-tests-vs-tutorials.md.
+# root project or tutorials/ first. See docs/adr/0011-tutorials-and-their-purpose.md.
 cmake_minimum_required(VERSION 3.20)
 
 set(REFLECTION_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../..")
