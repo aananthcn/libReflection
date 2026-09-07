@@ -67,9 +67,13 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
    compile error) — see "Fixed bugs" for why this specific push is
    needed and why the destructor, not the constructor, is what's
    called.
-3. **Compile the driver** with debug info (`-std=c++20 -g -gdwarf-4`
-   plus the project's include paths) — a fixed flag set, not the real
-   target's full compile settings (see "Known limitations").
+3. **Compile the driver** as a real CMake `OBJECT` library target,
+   mirroring the real target's own `COMPILE_DEFINITIONS`/
+   `INCLUDE_DIRECTORIES`/`COMPILE_OPTIONS` on top of a fixed
+   `-std=c++20 -g -gdwarf-4` floor and this pipeline's own required
+   include paths — see "Fixed bugs" for why mirroring the real
+   target's settings matters and how it's actually done (not by
+   hand-splicing a command string, which doesn't reliably work).
 4. **Extract**: parse the driver object's DWARF via
    `objdump --dwarf=info` / `readelf --debug-dump=info` text output —
    chosen over `pyelftools` (a new pip dependency) or a hand-rolled
@@ -128,13 +132,6 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 
 ## Known limitations, stated plainly
 
-- **The extraction driver does not mirror the real target's full
-  compile settings** (custom `-D` defines, non-default struct-packing
-  pragmas). Equivalent to the real compile for everything tested so
-  far (including the QNX cross-builds), but not the same *guarantee*
-  as reusing the target's actual `COMPILE_OPTIONS`/`COMPILE_DEFINITIONS`
-  via CMake generator expressions would be — should be tightened before
-  trusting this for a target with non-default, layout-affecting flags.
 - **Templates are excluded from discovery entirely** — a templated
   type still needs a hand-written `REFLECT_CLASS_BEGIN`, or a future
   extension that knows which concrete instantiations to touch.
@@ -210,6 +207,27 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   `DW_AT_byte_size`, so excluding this pseudo-member doesn't affect the
   reported total size — only removes it from `GetMembers()`. Covered by
   `test_vtable_pointer_is_excluded_from_members`.
+- **The extraction driver used a fixed flag set, not the real target's
+  own compile settings** — meaning a custom `-D` define or a
+  non-default, layout-affecting flag (e.g. struct-packing) on the real
+  target could make the extracted object silently disagree with the
+  real one. Fixed: the driver now compiles as a real CMake `OBJECT`
+  library (`cmake/GenerateDwarfReflection.cmake`'s
+  `<TARGET>_dwarf_extraction_driver`) with
+  `target_compile_definitions`/`target_include_directories`/
+  `target_compile_options` reading `$<TARGET_PROPERTY:TARGET,...>` off
+  the real target, resolved at generate time. **A hand-rolled
+  `add_custom_command` invocation splicing these properties into one
+  command string via `"SHELL:...$<JOIN:...>"` was tried first and does
+  not work** — verified: the Unix Makefiles generator did not honor
+  `SHELL:` at all, passing the whole joined string through as one
+  malformed argument instead of splitting it into separate flags. The
+  `OBJECT`-library approach avoids this entirely by letting CMake's own
+  target-property machinery (proven correct for any ordinary target)
+  form the flags, rather than reimplementing that logic by hand.
+  Verified end to end: a `target_compile_definitions()` macro that
+  changes a member's array size (`#ifdef`-guarded) is now correctly
+  reflected in the extracted layout, cross-compiled for QNX SDP 8.0 too.
 
 ## Future work: enums
 

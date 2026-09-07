@@ -15,10 +15,14 @@
 #      compiler to emit that type's FULL debug info -- a type merely
 #      named in an unevaluated context like sizeof() is not guaranteed
 #      to get full DWARF output, verified empirically).
-#   3. Compile the driver with -g -gdwarf-4 into a throwaway object
-#      (never linked into anything -- #include-ing an arbitrary .cpp,
-#      even one with its own main(), is safe here since this object is
-#      never combined with another translation unit).
+#   3. Compile the driver -- as its own OBJECT library target, so it
+#      can mirror TARGET's own COMPILE_DEFINITIONS/INCLUDE_DIRECTORIES/
+#      COMPILE_OPTIONS (custom -D defines, non-default struct-packing
+#      flags, etc.) on top of a fixed -std=c++20 -g -gdwarf-4 floor --
+#      into a throwaway object (never linked into anything --
+#      #include-ing an arbitrary .cpp, even one with its own main(), is
+#      safe here since this object is never combined with another
+#      translation unit).
 #   4. Read that object's DWARF (via CMake's own ${CMAKE_OBJDUMP} --
 #      the toolchain-matching one, e.g. QNX SDP's target-specific
 #      "<triple>-objdump" when cross-compiling, not the host's --
@@ -79,17 +83,46 @@ function(reflection_generate_dwarf)
         VERBATIM
     )
 
-    set(extraction_obj "${CMAKE_CURRENT_BINARY_DIR}/dwarf_extract_${ARG_TARGET}.o")
-    add_custom_command(
-        OUTPUT "${extraction_obj}"
-        COMMAND "${CMAKE_CXX_COMPILER}" -std=c++20 -g -gdwarf-4
-                -I "${REFLECTION_ROOT_DIR}/src" -I "${CMAKE_CURRENT_BINARY_DIR}"
-                -I "${REFLECTION_GENERATED_INCLUDE_DIR}"
-                -c "${driver_cpp}" -o "${extraction_obj}"
-        DEPENDS "${driver_cpp}"
-        COMMENT "Compiling ${ARG_SOURCE} with debug info for DWARF extraction"
-        VERBATIM
+    # Compiled as a real (OBJECT) CMake target, not a hand-rolled
+    # compiler invocation in a custom command -- so it can mirror
+    # TARGET's own COMPILE_DEFINITIONS/INCLUDE_DIRECTORIES/
+    # COMPILE_OPTIONS via ordinary target_compile_definitions()/
+    # target_include_directories()/target_compile_options() reading
+    # $<TARGET_PROPERTY:TARGET,...>, resolved at generate time so call
+    # order relative to those calls on TARGET doesn't matter. CMake's
+    # own target-property machinery is what turns a property list into
+    # correctly individually-split -D/-I/etc. flags; splicing them
+    # into one COMMAND string by hand (e.g. via "SHELL:...$<JOIN:...>"
+    # in add_custom_command) was tried first and does NOT reliably
+    # work -- verified: the Unix Makefiles generator did not honor
+    # SHELL: at all, passing the whole joined string as one malformed
+    # argument instead of splitting it. This target-based approach
+    # means the object DWARF is extracted from can't disagree with the
+    # real one on anything that affects layout (custom -D defines,
+    # non-default struct-packing pragmas via e.g. -fpack-struct). See
+    # docs/adr/0013's "Fixed bugs" for why this used to be a real, open
+    # risk (a fixed flag set only, with no such guarantee).
+    set(driver_target "${ARG_TARGET}_dwarf_extraction_driver")
+    add_library(${driver_target} OBJECT "${driver_cpp}")
+    target_compile_definitions(${driver_target} PRIVATE
+        $<TARGET_PROPERTY:${ARG_TARGET},COMPILE_DEFINITIONS>
     )
+    target_include_directories(${driver_target} PRIVATE
+        "${REFLECTION_ROOT_DIR}/src" "${CMAKE_CURRENT_BINARY_DIR}" "${REFLECTION_GENERATED_INCLUDE_DIR}"
+        $<TARGET_PROPERTY:${ARG_TARGET},INCLUDE_DIRECTORIES>
+    )
+    target_compile_options(${driver_target} PRIVATE
+        -std=c++20 -g -gdwarf-4
+        $<TARGET_PROPERTY:${ARG_TARGET},COMPILE_OPTIONS>
+    )
+    # An add_custom_command's DEPENDS on $<TARGET_OBJECTS:driver_target>
+    # alone isn't enough for the Unix Makefiles generator to reliably
+    # trigger the recursive sub-make that actually builds
+    # driver_target's object first -- verified empirically ("No rule
+    # to make target ...dwarf_extraction_driver....cpp.o"). An explicit
+    # target-level dependency is generator-agnostic and reliable.
+    add_dependencies(${ARG_TARGET} ${driver_target})
+    set(extraction_obj "$<TARGET_OBJECTS:${driver_target}>")
 
     set(objdump_bin "objdump")
     if(CMAKE_OBJDUMP)
