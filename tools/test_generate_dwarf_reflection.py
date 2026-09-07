@@ -95,6 +95,17 @@ class TestEmitDriver(unittest.TestCase):
         self.assertIn("Touch_A touch_A;", content)
         self.assertIn("B value;", content)
         self.assertIn("Touch_B touch_B;", content)
+        # Regression test for the virtual-base-class bug (see
+        # docs/adr/0013): a type inheriting from a polymorphic base
+        # doesn't get full DWARF just from being a union member --
+        # its destructor must actually be called somewhere in compiled
+        # code (even unreachable code). NeverCalled_<Type> calling
+        # ForceFullDwarf forces exactly that, without ever needing to
+        # know a constructor's arguments.
+        self.assertIn("template <typename T>", content)
+        self.assertIn("void ForceFullDwarf(T& obj)", content)
+        self.assertIn("void NeverCalled_A() { ForceFullDwarf(touch_A.value); }", content)
+        self.assertIn("void NeverCalled_B() { ForceFullDwarf(touch_B.value); }", content)
 
     def test_driver_with_no_types_has_no_touch_block(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +262,33 @@ class TestEndToEndExtraction(unittest.TestCase):
         self.assertIn("REFLECT_DWARF_CLASS_BEGIN(Samples, 16)", out)
         self.assertIn('REFLECT_DWARF_MEMBER("values", "array<float, 4>", 0, 16, 1)', out)
 
+    def test_virtual_base_class_resolves_correctly(self):
+        # Regression test for a real, serious bug (see docs/adr/0013):
+        # GCC never emits a full DW_TAG_structure_type definition for a
+        # type inheriting from a polymorphic base when the only touch
+        # is a union member that's never actually constructed/destroyed
+        # -- only an incomplete DW_AT_declaration stub (byte_size 0, no
+        # members). This used to make WithVirtualBase silently resolve
+        # to REFLECT_DWARF_CLASS_BEGIN(WithVirtualBase, 0) with NO
+        # members at all -- not a compile error, not an abstention,
+        # just silently wrong. Also exercises the hardest combination:
+        # a virtual base AND a constructor requiring an argument AND a
+        # private member, all at once.
+        out = self._extract(
+            "struct VBase {\n"
+            "    virtual ~VBase() {}\n"
+            "    virtual void Foo() {}\n"
+            "    int base_value;\n"
+            "};\n"
+            "struct WithVirtualBase : virtual VBase {\n"
+            "    explicit WithVirtualBase(int v) : v_(v) {}\n"
+            "private:\n"
+            "    int v_;\n"
+            "};\n"
+        )
+        self.assertIn("REFLECT_DWARF_CLASS_BEGIN(WithVirtualBase, 32)", out)
+        self.assertIn('REFLECT_DWARF_MEMBER("v_", "int", 8, 4, 1)', out)
+
     def test_namespace_qualified_type_name_is_not_truncated(self):
         # Regression test for a real bug in parse_name(): objdump wraps
         # some DW_AT_name values as
@@ -296,6 +334,20 @@ class TestEndToEndExtraction(unittest.TestCase):
         by_offset = {d["offset"]: d for d in dies}
         self.assertIsNotNone(gen.find_type("Real", dies, by_offset))
         self.assertIsNone(gen.find_type("DoesNotExist", dies, by_offset))
+
+    def test_find_type_skips_a_declaration_only_stub(self):
+        # Defense-in-depth regression test (see docs/adr/0013): a name
+        # that only ever appears as an incomplete DW_AT_declaration
+        # stub in the DWARF (e.g. a type that's forward-declared and
+        # used only via a pointer, never actually defined anywhere)
+        # must be treated as "not found", never as a real type with
+        # zero members and byte_size 0 -- which is exactly what the
+        # virtual-base-class bug looked like before it was fixed.
+        self._extract("struct Forward;\nstruct HasPointer { Forward* p; };")
+        dwarf_text = gen.dump_dwarf(self.last_object)
+        dies = gen.parse_dies(dwarf_text)
+        by_offset = {d["offset"]: d for d in dies}
+        self.assertIsNone(gen.find_type("Forward", dies, by_offset))
 
 
 if __name__ == "__main__":

@@ -147,7 +147,34 @@ def emit_driver(source_path: str, output_path: Path):
     type_names = discover_type_names(source_path)
     lines = [f'#include "{source_abs}"', ""]
     if type_names:
+        lines.append("#include <type_traits>")
+        lines.append("")
         lines.append("namespace reflect_dwarf_extraction_touch {")
+        lines.append("")
+        # A type that (directly or transitively) inherits from a class
+        # with a virtual function does NOT get full DWARF just from
+        # being a union member below -- verified empirically: GCC only
+        # emits a DW_AT_declaration stub for it (byte_size 0, no
+        # members) unless its constructor is actually CALLED somewhere
+        # in compiled code (even genuinely unreachable code still gets
+        # compiled). Calling the real constructor would need real
+        # constructor arguments, which defeats the whole point of the
+        # union trick below (needed for a type with no default
+        # constructor). Calling the DESTRUCTOR instead needs none --
+        # explicitly destroying the union member in a function that's
+        # never called forces the exact same full emission, verified
+        # for a type with both a required-argument constructor AND a
+        # virtual base. is_destructible_v guards types with a deleted
+        # or inaccessible destructor (rare, but a real edge case) so
+        # this never turns a type that used to compile into a hard
+        # error.
+        lines.append("template <typename T>")
+        lines.append("void ForceFullDwarf(T& obj) {")
+        lines.append("    if constexpr (std::is_destructible_v<T>) {")
+        lines.append("        obj.~T();")
+        lines.append("    }")
+        lines.append("}")
+        lines.append("")
         for name in type_names:
             # A plain "Type touch_Type;" only works for default-
             # constructible types -- verified this fails to compile
@@ -166,6 +193,7 @@ def emit_driver(source_path: str, output_path: Path):
             lines.append(f"    ~Touch_{name}() {{}}")
             lines.append("};")
             lines.append(f"Touch_{name} touch_{name};")
+            lines.append(f"void NeverCalled_{name}() {{ ForceFullDwarf(touch_{name}.value); }}")
         lines.append("}")
     output_path.write_text("\n".join(lines) + "\n")
 
@@ -338,13 +366,26 @@ def find_type(type_name: str, dies, by_offset):
     "<unknown>" sentinel) is left out of the member list entirely --
     its name is returned in skipped_names instead, so the caller can
     note it was omitted rather than silently emit wrong offset/size
-    data for it."""
+    data for it.
+
+    A same-named DIE carrying DW_AT_declaration (an incomplete
+    forward-declaration stub -- no members, no real byte_size) is
+    skipped in favor of a later, real definition: a type can be
+    forward-declared (e.g. as a pointer's pointee, or -- see
+    docs/adr/0013's virtual-base-class fix -- before the compiler
+    decides to emit its full definition at all) anywhere earlier in
+    the same object than its actual full DW_TAG_structure_type/
+    DW_TAG_class_type DIE. Returning the first tag/name match
+    unconditionally used to silently return the incomplete stub (zero
+    members, byte_size 0) as if it were the real type."""
     offset_to_index = {d["offset"]: i for i, d in enumerate(dies)}
     for i, die in enumerate(dies):
         if die["tag"] not in TYPE_DIE_TAGS:
             continue
         name_attr = die["attrs"].get("DW_AT_name")
         if name_attr is None or parse_name(name_attr) != type_name:
+            continue
+        if die["attrs"].get("DW_AT_declaration"):
             continue
         depth = die["depth"]
         byte_size = int(die["attrs"].get("DW_AT_byte_size", "0") or 0)

@@ -46,9 +46,9 @@ scope needs an explicit, recorded boundary.
 
 - Reflecting an unsupported member type degrades gracefully (opaque
   leaf for pointers/refs) or fails to compile (dynamic containers,
-  virtual-base classes) — never silently wrong offsets. **This
-  guarantee does not currently hold for the DWARF path and a virtual
-  base class** — see below, the one real, serious exception found.
+  virtual-base classes) — never silently wrong offsets. This briefly
+  didn't hold for the DWARF path and a virtual base class (a real bug,
+  found and fixed — see below).
 - Keeps v1 minimal per ARCHITECTURE.md's instruction to trim scope
   rather than gold-plate.
 
@@ -84,15 +84,15 @@ was checked against it directly (real compiles, real DWARF):
   `"vector<int, std::allocator<int> >"`. Fixed: finds the literal
   `"): "` delimiter instead. Covered by `TestParseName` and
   `test_namespace_qualified_type_name_is_not_truncated`.
-- **A real, serious, unfixed bug: a class with a virtual base class can
-  silently resolve to zero members and byte_size 0** — not a compile
-  error, not an abstention, contradicting this page's "never silently
-  wrong" guarantee. Root cause and fix plan tracked in
-  [0013](0013-dwarf-based-reflection-generation.md)'s
-  "Known limitations" (GCC never emits a full definition for such a
-  type in the extracted object; `find_type()` doesn't check for an
-  incomplete-declaration DIE). Until fixed, `REFLECT_CLASS_BEGIN`
-  remains the only safe path for such a type.
+- **A real, serious bug, since fixed: a class with a virtual base class
+  used to silently resolve to zero members and byte_size 0** — not a
+  compile error, not an abstention, contradicting this page's "never
+  silently wrong" guarantee. Root cause and fix tracked in
+  [0013](0013-dwarf-based-reflection-generation.md)'s "Fixed bugs" (GCC
+  didn't emit a full definition for such a type unless its destructor
+  was actually called somewhere in compiled code; `find_type()` also
+  didn't check for an incomplete-declaration DIE). This page's
+  "never silently wrong" guarantee holds again.
 - **Lower-severity observation, found alongside it**: DWARF exposes the
   compiler-generated vtable pointer as an ordinary member
   (`_vptr.Base`, type `"<unknown>**"`) for any class with a virtual

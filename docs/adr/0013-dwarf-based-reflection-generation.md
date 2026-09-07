@@ -2,10 +2,10 @@
 
 **Status:** Implemented and verified — on the Linux host, via the QNX
 SDP 8.0 cross-toolchain (`x86_64` and `aarch64`), and by running on a
-real QNX 8.0 aarch64 device (not just cross-compiled). 19 Python tests
-in `tools/test_generate_dwarf_reflection.py`. See "Known limitations"
-below for what's still open, including one serious, unfixed bug
-(virtual base classes).
+real QNX 8.0 aarch64 device (not just cross-compiled). 25 Python tests
+in `tools/test_generate_dwarf_reflection.py`. See "Fixed bugs" for the
+virtual-base-class bug (a serious one — silently zero members — now
+fixed) and "Known limitations" for what's still open.
 
 ## Context
 
@@ -57,7 +57,15 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
    instance is a union wrapper with a no-op default constructor/
    destructor (`union Touch_T { T value; char dummy; Touch_T():dummy(0){} ~Touch_T(){} };`),
    not a plain `T touch_T;`, so it compiles even for a type whose only
-   constructor requires arguments.
+   constructor requires arguments. A type inheriting from a polymorphic
+   base needs one more push beyond just being a union member: the
+   driver also emits a never-invoked `NeverCalled_T()` function that
+   explicitly destroys the union member via a small
+   `ForceFullDwarf<T>` template (guarded by `std::is_destructible_v<T>`
+   so a deleted/inaccessible destructor can't turn this into a hard
+   compile error) — see "Fixed bugs" for why this specific push is
+   needed and why the destructor, not the constructor, is what's
+   called.
 3. **Compile the driver** with debug info (`-std=c++20 -g -gdwarf-4`
    plus the project's include paths) — a fixed flag set, not the real
    target's full compile settings (see "Known limitations").
@@ -119,22 +127,6 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 
 ## Known limitations, stated plainly
 
-- **A class with a virtual base class can silently resolve to zero
-  members and byte_size 0 — a real, serious bug, not an abstention.**
-  GCC never emits a full `DW_TAG_structure_type` definition for a
-  virtually-inherited class in the extracted object — only an
-  incomplete `DW_AT_declaration: 1` stub — even though the
-  union-wrapper touch computes its real size internally.
-  `find_type()` doesn't check for `DW_AT_declaration` and returns the
-  first tag/name match unconditionally, so it silently returns the
-  incomplete stub as the type. **Not fixed.** Likely needs: (1)
-  `find_type()` skipping any `DW_AT_declaration` candidate and
-  searching for a real definition (general defense-in-depth, not just
-  for virtual inheritance); (2) a touch-mechanism fix to force full
-  emission for a virtually-inherited type, not yet understood how.
-  Until fixed, a type with a virtual base class must not be relied on
-  through this pipeline — `REFLECT_CLASS_BEGIN`'s existing guard (see
-  [0004](0004-member-representation-scope.md)) is the only safe path.
 - **DWARF exposes the compiler-generated vtable pointer as an ordinary
   member** (`_vptr.Base`, type `"<unknown>**"`) for any class with a
   virtual function — accurate data, but not something a consumer
@@ -178,6 +170,30 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 - **`REFLECT_DWARF_MEMBER`'s `Count` was hardcoded to 1**, even for
   array members. Fixed: `resolve_type()` returns `(name, size, count)`;
   `REFLECT_DWARF_MEMBER` takes a fifth `Count` argument.
+- **A class with a virtual base class silently resolved to zero
+  members and `byte_size 0`** — not a compile error, not an
+  abstention. Root cause, in two parts: (1) GCC never emits a full
+  `DW_TAG_structure_type` definition for a type that (directly or
+  transitively) inherits from a polymorphic base when the only touch
+  is a union member that's never actually constructed/destroyed — only
+  an incomplete `DW_AT_declaration: 1` stub, even though the
+  union-wrapper touch computes the type's real size internally; (2)
+  `find_type()` didn't check for `DW_AT_declaration` and returned the
+  first tag/name match unconditionally, so it silently returned that
+  incomplete stub as the type. **Fixed**, both parts: the driver now
+  also emits a `ForceFullDwarf<T>` template (guarded by
+  `std::is_destructible_v<T>`) and calls it from a never-invoked
+  `NeverCalled_<Type>()` function that explicitly destroys the union
+  member — verified this forces full emission for a type with a
+  virtual base *and* a constructor requiring an argument *and* a
+  private member, all at once, without ever needing to know the
+  constructor's arguments (unlike calling the real constructor, which
+  would). `find_type()` now also skips any `DW_AT_declaration`
+  candidate and keeps searching for a real definition — general
+  defense-in-depth against picking the wrong DIE for *any*
+  forward-declared type, not just this one. Covered by
+  `test_virtual_base_class_resolves_correctly` and
+  `test_find_type_skips_a_declaration_only_stub`.
 - **A cmake include-path bug broke `tutorials/01_hello_world` when
   built via the `tutorials/` aggregator** (not standalone): the
   extraction driver guessed the generated `Version.hpp`'s directory as
