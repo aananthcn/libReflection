@@ -57,18 +57,18 @@ static void check_this_aswell() {
     const auto& r3 = reflect::Reflect<BetterPoint>();
 
     std::cout << std::endl;
-    std::cout << "r2's class name: " << r2.GetClassName() << "\n";
+    std::cout << "r2's class name: " << r2.GetName() << "\n";
     for (const auto& m : r2.GetMembers()) {
-        std::cout << "  " << m.GetType() << " " << m.GetClassName() << " @ offset " << m.GetOffset() << "\n";
+        std::cout << "  " << m.GetType() << " " << m.GetName() << " @ offset " << m.GetOffset() << "\n";
     }
-    std::cout << "r3's class name: " << r3.GetClassName() << "\n";
+    std::cout << "r3's class name: " << r3.GetName() << "\n";
     for (const auto& m : r3.GetMembers()) {
-        std::cout << "  " << m.GetType() << " " << m.GetClassName() << " @ offset " << m.GetOffset() << "\n";
+        std::cout << "  " << m.GetType() << " " << m.GetName() << " @ offset " << m.GetOffset() << "\n";
     }
     const auto& r4 = reflect::Reflect<Widget>();
-    std::cout << "r4's class name: " << r4.GetClassName() << "\n";
+    std::cout << "r4's class name: " << r4.GetName() << "\n";
     for (const auto& m : r4.GetMembers()) {
-        std::cout << "  " << m.GetType() << " " << m.GetClassName() << " @ offset " << m.GetOffset() << "\n";
+        std::cout << "  " << m.GetType() << " " << m.GetName() << " @ offset " << m.GetOffset() << "\n";
     }
     std::cout << std::endl;
 }
@@ -79,11 +79,11 @@ int main() {
     const auto& r = reflect::Reflect<HelloWorld>();
 
     std::cout << "\nHello, reflection!\n";
-    std::cout << "Describing a '" << r.GetClassName() << "' (" << r.GetSize()
+    std::cout << "Describing a '" << r.GetName() << "' (" << r.GetSize()
               << " bytes), reflected with zero annotation:\n";
 
     for (const auto& member : r.GetMembers()) {
-        std::cout << "  " << member.GetType() << " " << member.GetClassName() << " @ offset "
+        std::cout << "  " << member.GetType() << " " << member.GetName() << " @ offset "
                   << member.GetOffset() << " (size " << member.GetSize() << ")\n";
     }
 

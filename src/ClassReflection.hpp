@@ -66,7 +66,7 @@ public:
     // docs/adr/0003-public-api-and-namespace.md. Fields stay public per
     // ARCHITECTURE.md, but going through these lets the internal
     // representation evolve without breaking callers.
-    const std::string& GetClassName() const noexcept { return name; }
+    const std::string& GetName() const noexcept { return name; }
     const std::string& GetType() const noexcept { return type; }
     std::uint32_t GetOffset() const noexcept { return offset; }
     std::uint32_t GetSize() const noexcept { return size; }

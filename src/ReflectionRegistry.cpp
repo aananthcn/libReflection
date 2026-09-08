@@ -44,8 +44,8 @@ void RegisterInGlobalRegistry(const ClassReflection& reflection) {
     // by name would make every such type silently collide under that
     // one key. FindByName only ever resolves macro-registered types;
     // FindByHash still works for both.
-    if (reflection.GetClassName() != kAutoAggregateTypeName) {
-        registry.by_name.emplace(reflection.GetClassName(), &reflection);
+    if (reflection.GetName() != kAutoAggregateTypeName) {
+        registry.by_name.emplace(reflection.GetName(), &reflection);
     }
 }
 

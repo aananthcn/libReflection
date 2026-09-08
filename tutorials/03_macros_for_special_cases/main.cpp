@@ -70,14 +70,14 @@ int main() {
               << " ints (automatic reflection would have refused to compile this)\n";
 
     const auto& vec3 = reflect::Reflect<Vec3>();
-    std::cout << "Vec3 keeps its real name '" << vec3.GetClassName()
-              << "' and member names (" << vec3.FindMember("y")->GetClassName()
+    std::cout << "Vec3 keeps its real name '" << vec3.GetName()
+              << "' and member names (" << vec3.FindMember("y")->GetName()
               << ", ...) instead of \"<aggregate>\"/\"field1\"\n";
 
     const auto& counter = reflect::Reflect<BoundedCounter>();
     std::cout << "BoundedCounter is not an aggregate (constructor + method), "
                  "but its public 'count' field reflects fine by hand: "
-              << counter.FindMember("count")->GetClassName() << "\n";
+              << counter.FindMember("count")->GetName() << "\n";
 
     // reflect::FindByName only ever resolves macro-registered types
     // like these -- see tutorials/01_hello_world for the auto-reflected

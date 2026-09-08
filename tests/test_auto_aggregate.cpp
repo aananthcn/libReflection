@@ -74,7 +74,7 @@ TEST_CASE(FindByNameDoesNotResolveAutoReflectedTypes) {
     // that one key, so the registry deliberately skips it. See
     // docs/adr/0001's revision.
     const auto& r = reflect::Reflect<LegacyPoint>();
-    REQUIRE(reflect::FindByName(r.GetClassName()) == nullptr);
+    REQUIRE(reflect::FindByName(r.GetName()) == nullptr);
 }
 
 TEST_CASE(FindByHashStillResolvesAutoReflectedTypes) {

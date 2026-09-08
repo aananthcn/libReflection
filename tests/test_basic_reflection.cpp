@@ -21,7 +21,7 @@ REFLECT_CLASS_END()
 
 TEST_CASE(BasicMemberOffsetsAndCount) {
     const auto& r = reflect::Reflect<Vec3>();
-    REQUIRE(r.GetClassName() == "Vec3");
+    REQUIRE(r.GetName() == "Vec3");
     REQUIRE(r.GetMembers().size() == 3);
     REQUIRE(r.GetSize() == sizeof(Vec3));
 

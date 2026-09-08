@@ -24,7 +24,7 @@ not fields, so the shim can change field representation later without
 breaking callers.
 
 ```
-GetClassName() / GetType() / GetOffset() / GetSize() / GetCount()
+GetName() / GetType() / GetOffset() / GetSize() / GetCount()
 GetMembers() / GetHash() / GetEnumName() / GetEnumValues()
 IsBitFlag()
 IsEnum()      // !enum_name.empty()

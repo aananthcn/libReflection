@@ -33,7 +33,7 @@ void AppendField(std::string& out, std::string_view label, std::string_view valu
 // recursing into the member's full member list) -- see docs/adr/0002.
 std::string CanonicalDescription(const ClassReflection& r) {
     std::string out;
-    AppendField(out, "name", r.GetClassName());
+    AppendField(out, "name", r.GetName());
     AppendField(out, "type", r.GetType());
     AppendField(out, "size", std::to_string(r.GetSize()));
     AppendField(out, "count", std::to_string(r.GetCount()));
@@ -50,7 +50,7 @@ std::string CanonicalDescription(const ClassReflection& r) {
     }
 
     for (const auto& member : r.GetMembers()) {
-        AppendField(out, "member", member.GetClassName());
+        AppendField(out, "member", member.GetName());
         AppendField(out, "member_offset", std::to_string(member.GetOffset()));
         for (auto word : member.GetHash().words) {
             AppendField(out, "member_hash", std::to_string(word));

@@ -21,9 +21,9 @@
 #include "generated_dwarf_reflection.hpp"
 
 static void Describe(const char* label, const reflect::ClassReflection& r) {
-    std::cout << label << " '" << r.GetClassName() << "' (" << r.GetSize() << " bytes):\n";
+    std::cout << label << " '" << r.GetName() << "' (" << r.GetSize() << " bytes):\n";
     for (const auto& m : r.GetMembers()) {
-        std::cout << "  " << m.GetType() << " " << m.GetClassName() << " @ offset "
+        std::cout << "  " << m.GetType() << " " << m.GetName() << " @ offset "
                   << m.GetOffset() << " (size " << m.GetSize() << ", count " << m.GetCount()
                   << ")\n";
     }

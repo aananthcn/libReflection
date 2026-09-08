@@ -27,11 +27,11 @@ int main() {
     std::cout << "Reflected '" << r.GetType() << "' (" << r.GetSize()
               << " bytes) with zero annotation:\n";
     for (const auto& member : r.GetMembers()) {
-        std::cout << "  " << member.GetClassName() << " (" << member.GetType()
+        std::cout << "  " << member.GetName() << " (" << member.GetType()
                   << ") @ offset " << member.GetOffset() << ", size "
                   << member.GetSize() << "\n";
         for (const auto& nested : member.GetMembers()) {
-            std::cout << "    " << nested.GetClassName() << " (" << nested.GetType()
+            std::cout << "    " << nested.GetName() << " (" << nested.GetType()
                       << ") @ relative offset " << nested.GetOffset() << "\n";
         }
     }

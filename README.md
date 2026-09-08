@@ -195,7 +195,7 @@ private:
 #include "generated_dwarf_reflection.hpp"  // after all type definitions in this file
 
 const auto& r = reflect::Reflect<PoorPoint>();
-r.GetClassName();                 // "PoorPoint", not "<unregistered>"
+r.GetName();                 // "PoorPoint", not "<unregistered>"
 r.FindMember("x")->GetOffset();   // 0 -- the real, private member
 ```
 

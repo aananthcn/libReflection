@@ -38,7 +38,7 @@ REFLECT_ENUM_END()
 static void macro_enum_reflection() {
     const auto& level = reflect::Reflect<LogLevel>();
     std::cout << "Part A -- reflect::Reflect<LogLevel>():\n";
-    std::cout << "  '" << level.GetClassName() << "' has "
+    std::cout << "  '" << level.GetName() << "' has "
               << level.GetEnumValues().size() << " named values\n";
     for (const auto& [name, value] : level.GetEnumValues()) {
         std::cout << "    " << name << " = " << value << "\n";

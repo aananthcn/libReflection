@@ -38,7 +38,7 @@ public:
     ClassReflection() = default;
 
     // Accessors (thin wrappers over the public fields below).
-    const std::string& GetClassName() const noexcept { return name; }
+    const std::string& GetName() const noexcept { return name; }
     const std::string& GetType() const noexcept { return type; }
     std::uint32_t GetOffset() const noexcept { return offset; }
     std::uint32_t GetSize() const noexcept { return size; }
