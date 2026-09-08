@@ -457,6 +457,58 @@ class TestEndToEndExtraction(unittest.TestCase):
         out = self._extract("struct WithArray { int values[3]; float f; };")
         self.assertNotIn('"<unknown>"', out)
 
+    def test_skipped_member_emits_a_build_warning(self):
+        # A member correctly left out as unresolvable used to be
+        # visible only as a `//` comment inside a generated file
+        # nobody reads -- see docs/adr/0013's "silently absent, not
+        # loudly flagged" limitation. A flexible array member (a GCC
+        # extension, not standard C++, but real code uses it) is the
+        # one known real-world case: GCC emits neither DW_AT_count nor
+        # DW_AT_upper_bound on its DW_TAG_subrange_type, so
+        # _array_dimensions() can't determine a size and resolve_type()
+        # abstains. extract() must now ALSO emit a real #warning
+        # directive alongside the comment, so a build that #includes
+        # the generated header can't miss it.
+        out = self._extract("struct WithFlex { int n; int values[]; };")
+        self.assertIn(
+            "// values: type not resolved in DWARF info -- skipped, not guessed.", out
+        )
+        self.assertIn(
+            "#warning WithFlex::values: type not resolved in DWARF info -- "
+            "member skipped, not guessed.",
+            out,
+        )
+
+    def test_type_not_found_emits_a_build_warning(self):
+        # Mirrors test_skipped_member_emits_a_build_warning for the
+        # whole-type "not found" path (see
+        # test_find_type_returns_none_for_a_name_not_in_dwarf's comment
+        # on why this can't be engineered through the real driver --
+        # every discovered name is unconditionally touch-instantiated).
+        # Compiles an object that never touches Ghost at all, so
+        # extract()'s find_type() genuinely can't find it, exercising
+        # extract()'s own "not found" branch (not find_type() directly).
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        tmp_path = Path(tmp)
+        source = tmp_path / "fixture.cpp"
+        source.write_text("struct Ghost { int a; };")
+        unrelated = tmp_path / "unrelated.cpp"
+        unrelated.write_text("int unrelated_global;")
+        obj = tmp_path / "unrelated.o"
+        subprocess.run(
+            ["g++", "-std=c++20", "-g", "-gdwarf-4", "-c", str(unrelated), "-o", str(obj)],
+            check=True, capture_output=True,
+        )
+        output = tmp_path / "out.hpp"
+        gen.extract(str(obj), str(source), output)
+        text = output.read_text()
+        self.assertIn("// Ghost: not found in DWARF info -- skipped, not guessed.", text)
+        self.assertIn(
+            "#warning Ghost: not found in DWARF info -- entire type skipped, not guessed.",
+            text,
+        )
+
     def test_find_type_returns_none_for_a_name_not_in_dwarf(self):
         # Exercises find_type()'s "not found" path directly against a
         # real compiled object's DWARF, rather than trying to engineer

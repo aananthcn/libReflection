@@ -203,6 +203,13 @@ One `cmake --build` runs the whole pipeline; adding a brand-new type
 to `main.cpp` resolves correctly on the next build with no other
 change. Walkthrough: [`tutorials/01_hello_world/`](tutorials/01_hello_world/README.md).
 
+If a member's type genuinely can't be resolved from DWARF (the only
+known case: an unbounded/flexible array member), or a discovered type
+turns out not to be in DWARF at all, it's correctly left out rather
+than guessed at — and the build itself now says so, with a real
+`#warning` at the generated line, not just a comment in a generated
+file nobody reads.
+
 **One caveat on where `reflect::Reflect<T>()` calls can live**: `SOURCE`
 itself must not call `reflect::Reflect<T>()` for a type with a direct
 array member (or anything else automatic aggregate reflection hard-

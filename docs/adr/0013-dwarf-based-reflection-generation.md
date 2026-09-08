@@ -2,12 +2,12 @@
 
 **Status:** Implemented and verified — on the Linux host, via the QNX
 SDP 8.0 cross-toolchain (`x86_64` and `aarch64`), and by running on a
-real QNX 8.0 aarch64 device (not just cross-compiled). 34 Python tests
+real QNX 8.0 aarch64 device (not just cross-compiled). 36 Python tests
 in `tools/test_generate_dwarf_reflection.py`. See "Fixed bugs" for the
 virtual-base-class bug (a serious one — silently zero members), the
-vtable-pointer exposure, the flags-mirroring gap, and template
-discovery, all now fixed/closed, and "Known limitations" for what's
-still open.
+vtable-pointer exposure, the flags-mirroring gap, template discovery,
+and the silently-absent-skip build warning, all now fixed/closed, and
+"Known limitations" for what's still open.
 
 ## Context
 
@@ -89,7 +89,12 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
    name/type/offset/size/count as **literal** values — never
    `decltype`/`offsetof` expressions. This is precisely what reaches a
    private member: nothing in the generated code is an
-   access-checked expression.
+   access-checked expression. A type DWARF has no record of at all, or
+   an individual member whose type can't be confidently resolved
+   (`resolve_type()`'s `"<unknown>"` sentinel), is left out — noted
+   with a `//` comment **and** a real `#warning` directive, so a build
+   that `#include`s the generated header can't silently miss it (see
+   "Fixed bugs").
 6. **Wire into the real target's compile**: `cmake/GenerateDwarfReflection.cmake`'s
    `reflection_generate_dwarf(TARGET <t> SOURCE <src>)` runs steps 1–5
    as `add_custom_command` steps, ordered via `OBJECT_DEPENDS` so
@@ -155,13 +160,6 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   is a **loud, hard compile error** in the generated driver (a name
   that isn't actually a template instantiation fails to compile) —
   never silently wrong reflection data.
-- **A truly unresolvable member's type is silently absent, not loudly
-  flagged.** `find_type()` skips it with a
-  `// <name>: type not resolved in DWARF info -- skipped, not guessed.`
-  comment rather than a wrong literal (the right abstention), but
-  nothing surfaces that comment as a build warning. Low risk in
-  practice — the only case found is an unbounded/flexible array
-  member, not standard C++ for a non-static data member.
 - **No member-ordering risk** (unlike [0012](0012-generated-reflection-names.md)'s
   text scanner): DWARF gives an explicit, unambiguous offset per named
   member directly.
@@ -290,6 +288,26 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   `test_normalizes_instantiation_spacing_variants`,
   `test_template_instantiation_resolves_correctly`, and
   `test_multi_argument_template_instantiation_resolves_correctly`.
+- **A truly unresolvable member's type, or a whole type not found in
+  DWARF at all, was silently absent — noted only in a `//` comment
+  inside a generated file nobody reads, never surfaced at build time.**
+  The right behavior (abstain, don't guess) was already in place; only
+  its visibility was missing. Fixed: `extract()` now also emits a real
+  `#warning` preprocessor directive alongside each such comment —
+  `#warning <Type>::<member>: type not resolved in DWARF info --
+  member skipped, not guessed.` for an individual member, `#warning
+  <Type>: not found in DWARF info -- entire type skipped, not
+  guessed.` for a whole type. `#warning` is a non-standard but
+  essentially universal GCC/Clang extension (QNX's GCC-based `qcc`/
+  `g++` front end included), never fails the build — same "abstain,
+  never guess, never break the build" policy as everything else this
+  tool does, just made visible. Verified end to end through the real
+  `reflection_generate_dwarf()` CMake pipeline (a flexible/unbounded
+  array member — the one known real-world case that hits this path —
+  compiles cleanly with exactly one `-Wcpp` warning at the exact
+  generated line, no error). Covered by
+  `test_skipped_member_emits_a_build_warning` and
+  `test_type_not_found_emits_a_build_warning`.
 
 ## Future work: enums
 

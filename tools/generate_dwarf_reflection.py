@@ -547,6 +547,22 @@ def find_type(type_name: str, dies, by_offset):
     return None
 
 
+def _skip_warning(message: str) -> str:
+    """Returns a "#warning <message>" preprocessor directive line. A
+    type or member DWARF couldn't confidently resolve (see extract())
+    is correctly left out of the generated registration rather than
+    guessed at, but leaving *only* a `//` comment behind meant nothing
+    ever surfaced that at build time -- easy to miss in a generated
+    header nobody reads. Emitting a real #warning instead makes every
+    build that #includes the generated header print it, without
+    failing the build (same "abstain, never guess, never break the
+    build" policy as everything else this tool does). #warning is a
+    non-standard but essentially universal GCC/Clang extension --
+    QNX's qcc/aarch64-unknown-nto-qnx8.0.0-g++ front end is GCC-based
+    and supports it too (see docs/adr/0013's "Fixed bugs")."""
+    return f"#warning {message}"
+
+
 def extract(object_path: str, source_path: str, output_path: Path, objdump: str = "objdump"):
     type_names = discover_type_names(source_path)
     dwarf_text = dump_dwarf(object_path, objdump)
@@ -572,6 +588,7 @@ def extract(object_path: str, source_path: str, output_path: Path, objdump: str 
         result = find_type(type_name, dies, by_offset)
         if result is None:
             lines.append(f"// {type_name}: not found in DWARF info -- skipped, not guessed.")
+            lines.append(_skip_warning(f"{type_name}: not found in DWARF info -- entire type skipped, not guessed."))
             continue
         byte_size, members, skipped = result
         # Type is REFLECT_DWARF_CLASS_BEGIN's trailing variadic
@@ -587,6 +604,9 @@ def extract(object_path: str, source_path: str, output_path: Path, objdump: str 
         for mname in skipped:
             lines.append(
                 f"    // {mname}: type not resolved in DWARF info -- skipped, not guessed."
+            )
+            lines.append(
+                _skip_warning(f"{type_name}::{mname}: type not resolved in DWARF info -- member skipped, not guessed.")
             )
         lines.append("REFLECT_DWARF_CLASS_END()")
         lines.append("")
