@@ -2,12 +2,13 @@
 
 **Status:** Implemented and verified — on the Linux host, via the QNX
 SDP 8.0 cross-toolchain (`x86_64` and `aarch64`), and by running on a
-real QNX 8.0 aarch64 device (not just cross-compiled). 36 Python tests
+real QNX 8.0 aarch64 device (not just cross-compiled). 40 Python tests
 in `tools/test_generate_dwarf_reflection.py`. See "Fixed bugs" for the
 virtual-base-class bug (a serious one — silently zero members), the
-vtable-pointer exposure, the flags-mirroring gap, template discovery,
-and the silently-absent-skip build warning, all now fixed/closed, and
-"Known limitations" for what's still open.
+vtable-pointer exposure, the flags-mirroring gap, template discovery
+(including nested template arguments), and the silently-absent-skip
+build warning, all now fixed/closed, and "Known limitations" for
+what's still open.
 
 ## Context
 
@@ -52,9 +53,11 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
    what's inside them. A template's bare declaration alone can't be
    touch-instantiated (no template argument is known there), so the
    same file set is searched again for actual USES of each discovered
-   template (e.g. `Box<int> value;`) instead — see "Fixed bugs" for how
-   this works and its residual risks. Enums are not discovered yet
-   (see "Future work").
+   template (e.g. `Box<int> value;`, or a nested one like
+   `Box<Box<int>>`) instead — see "Fixed bugs" for how this works
+   (a bracket-depth scanner, not a regex, is what makes nesting work)
+   and its residual risks. Enums are not discovered yet (see "Future
+   work").
 2. **Emit a driver**: a throwaway `.cpp` that `#include`s `SOURCE` and
    declares one instance of each discovered type, to force the
    compiler to emit that type's *full* DWARF (a type merely named in
@@ -141,13 +144,6 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 
 ## Known limitations, stated plainly
 
-- **A template instantiation used only inside a nested template
-  argument is never captured as a whole** (e.g. `Box<Box<int>>` itself
-  is never touched, though the inner `Box<int>` incidentally is, since
-  it also appears as a plain, non-nested match on its own) — this
-  scanner never parses balanced nested `<...>`, only a single,
-  non-nested argument list. A type that's *only* ever used this way
-  still needs a hand-written `REFLECT_CLASS_BEGIN`.
 - **A chained relational comparison shaped exactly like a
   single-argument template use with an integer-literal argument** (e.g.
   `Box < 5 > threshold`) is indistinguishable from a genuine non-type
@@ -258,11 +254,11 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   DWARF spelling (`_normalize_template_instantiation()`: no space
   after `<`/before `>`, exactly one space after each comma — verified
   against real compiled output) so `find_type()`'s later exact-string
-  lookup matches; a use with a nested template argument (e.g.
-  `Box<Box<int>>`'s outer layer) or an argument that doesn't look like
-  a plausible type/literal (`_TEMPLATE_ARG_SHAPE_RE`) is abstained on,
-  not guessed at — see "Known limitations" for the two residual risks
-  this still leaves.
+  lookup matches; an argument that doesn't look like a plausible
+  type/literal (`_TEMPLATE_ARG_SHAPE_RE`) is abstained on, not guessed
+  at — see "Known limitations" for the one residual risk this still
+  leaves. (A nested template argument, e.g. `Box<Box<int>>`'s outer
+  layer, was ALSO abstained on at this point — fixed separately below.)
 
   **A second, compounding bug found while building this**: a
   multi-argument instantiation's canonical name has a top-level comma
@@ -288,6 +284,46 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   `test_normalizes_instantiation_spacing_variants`,
   `test_template_instantiation_resolves_correctly`, and
   `test_multi_argument_template_instantiation_resolves_correctly`.
+- **A template instantiation used only inside a nested template
+  argument was never captured as a whole** (e.g. `Box<Box<int>>` itself
+  was never touched, though the inner `Box<int>` incidentally was,
+  since it also appears as a plain, non-nested match on its own) — the
+  use-scanner excluded `<`/`>` from the argument character class
+  entirely, so it could never match past the FIRST closing `>`, whether
+  or not that was the real end of the outer argument list. **Fixed**:
+  `_find_balanced_template_args()` replaces that exclusion with a
+  bracket-depth counter — each `<` in the scanned text is +1 depth,
+  each `>` is −1, and the match ends only when depth returns to 0 — so
+  a nested `<...>` no longer ends the outer scan early. Each argument
+  is then validated and normalized recursively
+  (`_normalize_arg()`/`_normalize_arg_list()`/`_split_top_level_args()`):
+  a leaf argument still has to match `_TEMPLATE_ARG_SHAPE_RE`, and a
+  nested one has to be a clean `Name<...>` with nothing trailing after
+  its own matching `>` (e.g. `Box<int>*` as one argument slot still
+  abstains the whole outer instantiation, not guessed at). Confirmed
+  empirically against real compiled DWARF that GCC's name for a nested
+  instantiation inserts a space between adjacent closing brackets —
+  `Box<Box<int>>` is spelled `"Box<Box<int> >"`, `Box<Box<Box<int>>>` is
+  `"Box<Box<Box<int> > >"` — a leftover of the pre-C++11 rule against
+  `>>` being lexed as the shift operator that GCC's internal type
+  printer still follows; `_close_adjacent_angle_brackets()` reproduces
+  this by turning every `>>` into `> >` (verified for 2 and 3 levels of
+  nesting and for a nested argument alongside a plain one, e.g.
+  `Pair<int, Box<int>>`). This same spelling is valid C++ source text
+  too (whitespace is insignificant outside literals), so the identical
+  canonical string works unmodified as both the driver's touch-instance
+  type and the generated macro's trailing `Type` argument — exactly
+  like the multi-argument-comma case above needed no separate handling
+  for driver emission vs. macro invocation vs. DWARF lookup. Verified
+  end to end through the real `reflection_generate_dwarf()` CMake
+  pipeline in a scratch project: `Box<Box<int>>` resolves at runtime
+  with the correct class name, size, and a `"value"` member correctly
+  typed as `"Box<int>"` (itself independently resolved too). Covered by
+  `test_resolves_the_outer_layer_of_a_nested_instantiation_too`,
+  `test_resolves_triple_nested_instantiation`,
+  `test_resolves_nested_instantiation_as_one_of_several_arguments`,
+  `test_abstains_on_a_nested_instantiation_with_trailing_junk`, and
+  `test_nested_template_instantiation_resolves_correctly`.
 - **A truly unresolvable member's type, or a whole type not found in
   DWARF at all, was silently absent — noted only in a `//` comment
   inside a generated file nobody reads, never surfaced at build time.**

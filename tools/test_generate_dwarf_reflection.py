@@ -117,21 +117,49 @@ class TestDiscoverTypeNames(unittest.TestCase):
         )
         self.assertEqual(names, ["Pair<int, float>"])
 
-    def test_abstains_on_the_outer_layer_of_a_nested_instantiation(self):
-        # "Box<Box<int>>" as a WHOLE is never captured -- this scanner
-        # never parses balanced nested "<...>", only a single,
-        # non-nested argument list, so the outer instantiation is
-        # abstained on rather than guessed at. The regex incidentally
-        # still matches the INNER "Box<int>" on its own, though (it
-        # reads as a plain, non-nested instantiation by itself) -- and
-        # that's a real, independently resolvable type, so finding it
-        # is correct, not a bug, even though it isn't a promise this
-        # scanner makes for every nested case.
+    def test_resolves_the_outer_layer_of_a_nested_instantiation_too(self):
+        # "Box<Box<int>>" as a WHOLE is captured, not just the inner
+        # "Box<int>" -- _find_balanced_template_args() counts bracket
+        # depth instead of excluding "<"/">" from the argument text, so
+        # arbitrary nesting no longer defeats discovery (see
+        # docs/adr/0013's "Fixed bugs": this used to be a documented
+        # limitation). Both the outer and inner instantiation are
+        # discovered, in the order their "Box<" occurs in the text --
+        # each is a real, independently resolvable type.
         names = self._run(
             "template <typename T> struct Box { T value; };\n"
             "Box<Box<int>> nested;\n"
         )
-        self.assertEqual(names, ["Box<int>"])
+        self.assertEqual(names, ["Box<Box<int> >", "Box<int>"])
+
+    def test_resolves_triple_nested_instantiation(self):
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "Box<Box<Box<int>>> triple;\n"
+        )
+        self.assertIn("Box<Box<Box<int> > >", names)
+
+    def test_resolves_nested_instantiation_as_one_of_several_arguments(self):
+        names = self._run(
+            "template <typename A, typename B> struct Pair { A a; B b; };\n"
+            "template <typename T> struct Box { T value; };\n"
+            "Pair<int, Box<int>> mixed;\n"
+        )
+        self.assertIn("Pair<int, Box<int> >", names)
+
+    def test_abstains_on_a_nested_instantiation_with_trailing_junk(self):
+        # "Box<int>*" as a single argument SLOT (a pointer to a nested
+        # instantiation) isn't a clean nested instantiation by itself --
+        # _normalize_arg() requires the nested instantiation's matching
+        # ">" to be the argument's last character. Abstain on the WHOLE
+        # outer instantiation rather than guess which part is real.
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "template <typename T> struct Wrap { T value; };\n"
+            "Wrap<Box<int>*> w;\n"
+        )
+        self.assertNotIn("Wrap<Box<int>*>", names)
+        self.assertEqual([n for n in names if n.startswith("Wrap<")], [])
 
     def test_abstains_on_implausible_template_argument(self):
         # Defense against emitting an instantiation that can't possibly
@@ -367,6 +395,29 @@ class TestEndToEndExtraction(unittest.TestCase):
         self.assertIn('REFLECT_DWARF_CLASS_BEGIN(8, "Pair<int, float>", Pair<int, float>)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("first", "int", 0, 4, 1)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("second", "float", 4, 4, 1)', out)
+
+    def test_nested_template_instantiation_resolves_correctly(self):
+        # The nested-instantiation regression this fixes (see
+        # docs/adr/0013's "Fixed bugs"): "Box<Box<int>>" as a WHOLE is
+        # now discovered, touched, and resolved -- not just the inner
+        # "Box<int>". GCC's DWARF spelling inserts a space before the
+        # closing ">" whenever it's adjacent to another closing ">"
+        # ("Box<Box<int> >", not "Box<Box<int>>") -- this same spelling
+        # doubles as valid C++ syntax (spacing is insignificant to the
+        # compiler outside literals), so it works unmodified as both
+        # the driver's touch-instance type AND the macro's trailing
+        # Type argument, exactly like the multi-argument-comma case
+        # above. This test fails to compile (not just asserts wrong
+        # output) if that stops being true.
+        out = self._extract(
+            "template <typename T> struct Box { T value; };\n"
+            "Box<Box<int>> nested;\n"
+        )
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(4, "Box<int>", Box<int>)', out)
+        self.assertIn(
+            'REFLECT_DWARF_CLASS_BEGIN(4, "Box<Box<int> >", Box<Box<int> >)', out
+        )
+        self.assertIn('REFLECT_DWARF_MEMBER("value", "Box<int>", 0, 4, 1)', out)
 
     def test_std_array_member_resolves_via_its_own_structure_type(self):
         # std::array<T, N> is a real class wrapping a C array internally

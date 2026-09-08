@@ -105,40 +105,169 @@ LOCAL_INCLUDE_RE = re.compile(r'#\s*include\s*"([^"]+)"')
 # case.
 _TEMPLATE_PRECEDING_RE = re.compile(r"template\s*<[^;{}]*>\s*$")
 
-# Matches a use of a known template name with a NON-nested argument
-# list (deliberately excludes "<" and ">" from the argument character
-# class -- a nested template argument like "Box<std::vector<int>>" is
-# abstained on, not guessed at, same conservative policy as everything
-# else this scanner does). The "(...)"  and function-call-shaped
-# exclusions in the character class also keep this from matching inside
-# a parameter list or expression it can't confidently parse.
+# Matches just a known template name immediately followed by "<" -- the
+# OPENING of its argument list. The argument list itself (which may
+# contain further nested "<...>", e.g. "Box<int>" inside
+# "Pair<int, Box<int>>") is then extracted separately by
+# _find_balanced_template_args(), which counts bracket depth -- no
+# regex can match arbitrarily-nested brackets on its own.
 def _template_use_re(name: str) -> "re.Pattern":
-    return re.compile(r"\b" + re.escape(name) + r"\s*<([^<>;{}()]*)>")
+    return re.compile(r"\b" + re.escape(name) + r"\s*<")
 
 
-# A template argument list is only trusted if every comma-separated
-# piece looks like a plain type name (optionally qualified, pointer/
-# reference-decorated) or an integer literal (for a non-type template
-# parameter) -- never an arbitrary expression. This exists specifically
-# to reject a false-positive match like "Box < 5 > threshold" (a
-# chained relational comparison, not a template instantiation): most
-# such expressions won't have this shape, and any that do are the one
-# documented residual risk of this heuristic -- see docs/adr/0013.
+def _find_balanced_template_args(text: str, open_index: int):
+    """text[open_index] must be the "<" that opens a template-use
+    argument list. Scans forward counting bracket depth (each "<" +1,
+    each ">" -1) to find the MATCHING ">" -- the one that brings depth
+    back to 0 -- so a nested argument list's own "<"/">" (e.g. the
+    inner "Box<int>" in "Pair<int, Box<int>>") doesn't end the scan
+    early. Returns (raw_args_text, end_index) where raw_args_text is
+    everything strictly between the opening "<" and its match, and
+    end_index is the index just past that match -- or None if depth
+    never returns to 0 before the text ends, or a character this
+    scanner never trusts inside a template argument list (";", "{",
+    "}", "(" -- an expression or statement shape, not a type/literal
+    list) appears at any depth. This is a bracket counter, not a real
+    C++ tokenizer: ">>" in the SOURCE TEXT for closing two levels (as
+    someone actually writes "Box<Box<int>>") is just two adjacent ">"
+    characters here, each closing one level -- no special-casing
+    needed, unlike an actual C++ parser's ">>"-as-one-token ambiguity."""
+    depth = 1
+    i = open_index + 1
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c in ";{}(":
+            return None
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+            if depth == 0:
+                return text[open_index + 1:i], i + 1
+        i += 1
+    return None
+
+
+# A LEAF template argument (one with no further nested "<...>" of its
+# own) is only trusted if it looks like a plain type name (optionally
+# qualified, pointer/reference-decorated) or an integer literal (for a
+# non-type template parameter) -- never an arbitrary expression. This
+# exists specifically to reject a false-positive match like
+# "Box < 5 > threshold" (a chained relational comparison, not a
+# template instantiation): most such expressions won't have this
+# shape, and any that do are the one documented residual risk of this
+# heuristic -- see docs/adr/0013.
 _TEMPLATE_ARG_SHAPE_RE = re.compile(r"^[\w:\s*&-]+$")
+
+# Matches a nested argument's HEAD: a (possibly namespace-qualified)
+# name immediately followed by "<" -- e.g. "Box" in "Box<int>", or
+# "std::vector" in "std::vector<int>". Used by _normalize_arg() to
+# decide whether an argument is itself a nested template instantiation
+# (recurse via _find_balanced_template_args()) or a leaf value (match
+# against _TEMPLATE_ARG_SHAPE_RE instead).
+_NESTED_ARG_HEAD_RE = re.compile(r"^([\w:]+)\s*<")
+
+
+def _split_top_level_args(args_str: str):
+    """Splits a template argument-list's raw text on commas at bracket
+    depth 0 ONLY -- a nested argument's own internal comma (e.g. the
+    one in "Box<int, float>" appearing inside
+    "Pair<int, Box<int, float>>") must stay attached to that nested
+    argument, not be treated as separating two of the OUTER list's
+    arguments."""
+    parts = []
+    depth = 0
+    current = []
+    for c in args_str:
+        if c == "<":
+            depth += 1
+        elif c == ">":
+            depth -= 1
+        if c == "," and depth == 0:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(c)
+    parts.append("".join(current))
+    return parts
+
+
+def _normalize_arg(arg: str):
+    """Validates and normalizes ONE template argument -- either a leaf
+    (a plain type/literal, see _TEMPLATE_ARG_SHAPE_RE) or a nested
+    template instantiation (recursing through this same machinery).
+    Returns the argument's normalized text (no brackets added yet --
+    the caller wraps it), or None to abstain: this argument's shape
+    isn't one this scanner trusts, so the WHOLE enclosing instantiation
+    is abandoned too (see _normalize_arg_list), never partially
+    guessed at."""
+    arg = arg.strip()
+    if not arg:
+        return None
+    head = _NESTED_ARG_HEAD_RE.match(arg)
+    if head is None:
+        if _TEMPLATE_ARG_SHAPE_RE.match(arg):
+            return re.sub(r"\s+", " ", arg)
+        return None
+    result = _find_balanced_template_args(arg, head.end() - 1)
+    if result is None:
+        return None
+    inner_text, end = result
+    if end != len(arg):
+        # Trailing text after the nested instantiation's matching ">"
+        # inside this one argument slot (e.g. "Box<int>*", "Box<int> x")
+        # -- not a clean nested instantiation by itself, abstain rather
+        # than guess which part of it is real.
+        return None
+    inner = _normalize_arg_list(inner_text)
+    if inner is None:
+        return None
+    return f"{head.group(1)}<{inner}>"
+
+
+def _normalize_arg_list(args_str: str):
+    """Validates and normalizes every top-level argument in args_str
+    (see _split_top_level_args), or returns None if any single one
+    doesn't confidently resolve -- one bad argument abstains the whole
+    instantiation, never a partial guess."""
+    args = [_normalize_arg(a) for a in _split_top_level_args(args_str)]
+    if not args or any(a is None for a in args):
+        return None
+    return ", ".join(args)
+
+
+def _close_adjacent_angle_brackets(spelling: str) -> str:
+    """GCC's DWARF type-name spelling for a nested template
+    instantiation inserts a space between any two adjacent closing
+    "<...>" brackets -- "Box<Box<int>>" is spelled "Box<Box<int> >" in
+    DWARF, "Box<Box<Box<int>>>" is "Box<Box<Box<int> > >" -- a
+    leftover of the pre-C++11 rule against ">>" being lexed as the
+    shift operator, which GCC's internal type printer still follows
+    even though the SOURCE code (and this tool's own bracket-depth
+    scanner) accepts ">>" directly. Verified empirically for 2 and 3
+    levels of nesting and for multi-argument templates (see
+    docs/adr/0013). Every ">" this tool ever assembles comes from a
+    real closing bracket (a leaf argument can't itself contain "<" or
+    ">", see _TEMPLATE_ARG_SHAPE_RE), so it's always correct to insert
+    a space wherever two of them are adjacent, anywhere in the
+    string -- not just at the very end."""
+    while ">>" in spelling:
+        spelling = spelling.replace(">>", "> >", 1)
+    return spelling
 
 
 def _normalize_template_instantiation(name: str, args_str: str):
-    """Returns the canonical "Name<arg1, arg2>" spelling GCC uses in
-    DWARF (no space after "<" or before ">", exactly one space after
-    each comma) for a template use's raw argument text, or None if any
-    argument doesn't look like a plausible type/value (see
-    _TEMPLATE_ARG_SHAPE_RE) -- abstain rather than emit an instantiation
-    that can't possibly compile."""
-    args = [a.strip() for a in args_str.split(",")]
-    if not args or any(not a or not _TEMPLATE_ARG_SHAPE_RE.match(a) for a in args):
+    """Returns the canonical spelling GCC uses in DWARF for a template
+    use's raw argument text (no space after "<", exactly one space
+    after each comma, and see _close_adjacent_angle_brackets() for
+    nested closing brackets), or None if any argument -- at any nesting
+    depth -- doesn't look like a plausible type/value: abstain rather
+    than emit an instantiation that can't possibly compile."""
+    args = _normalize_arg_list(args_str)
+    if args is None:
         return None
-    args = [re.sub(r"\s+", " ", a) for a in args]
-    return f"{name}<{', '.join(args)}>"
+    return _close_adjacent_angle_brackets(f"{name}<{args}>")
 
 
 def _scan_declarations(source_path: str, _visited=None, _texts=None):
@@ -216,11 +345,14 @@ def discover_type_names(source_path: str, _visited=None):
     "Box<int> value;" appearing anywhere in that file set) --
     real instantiations, since a type that's never actually used
     nowhere exists to reflect anyway. Each distinct, plausible
-    instantiation (see _normalize_template_instantiation) is appended
-    to the returned name list in its canonical "Box<int>" spelling,
-    matching how GCC names it in DWARF. A use this scanner can't
-    confidently parse (a nested template argument, an argument that
-    doesn't look like a type or literal) is skipped, not guessed at."""
+    instantiation (see _normalize_template_instantiation), INCLUDING
+    one used only as another instantiation's own argument (e.g.
+    "Box<int>" inside "Pair<int, Box<int>>" -- both are discovered and
+    touched, as two separate types), is appended to the returned name
+    list in its canonical spelling, matching how GCC names it in
+    DWARF. A use this scanner can't confidently parse (an argument that
+    doesn't look like a type, literal, or nested instantiation of a
+    plausible shape) is skipped, not guessed at."""
     visited = set() if _visited is None else _visited
     texts = {}
     names, template_names = _scan_declarations(source_path, visited, texts)
@@ -233,7 +365,11 @@ def discover_type_names(source_path: str, _visited=None):
         seen_instantiations = set()
         for text in texts.values():
             for m in use_re.finditer(text):
-                instantiation = _normalize_template_instantiation(template_name, m.group(1))
+                result = _find_balanced_template_args(text, m.end() - 1)
+                if result is None:
+                    continue
+                args_text, _end = result
+                instantiation = _normalize_template_instantiation(template_name, args_text)
                 if instantiation is None or instantiation in seen_instantiations:
                     continue
                 seen_instantiations.add(instantiation)
