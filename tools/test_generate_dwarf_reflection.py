@@ -172,23 +172,57 @@ class TestDiscoverTypeNames(unittest.TestCase):
         )
         self.assertEqual(names, [])
 
-    def test_known_residual_risk_of_bare_integer_comparison(self):
-        # Documented, accepted residual risk (see docs/adr/0013): a
-        # chained relational comparison shaped exactly like a
-        # single-argument template use with an integer-literal argument
-        # ("Box < 5 > threshold") is indistinguishable from a genuine
-        # non-type template instantiation "Box<5>" by text alone. This
-        # test exists to make that trade-off explicit and testable, not
-        # to assert it's fine to leave forever -- a real occurrence of
-        # this shape would surface as a hard, loud compile error in the
-        # generated driver (a name that isn't actually a template
-        # instantiation fails to compile), never as silently wrong
-        # reflection data.
+    def test_rejects_bare_integer_argument_for_a_type_only_template(self):
+        # THE FIX (see docs/adr/0013's "Fixed bugs"): "Box < 5 > threshold"
+        # used to be indistinguishable from a genuine "Box<5>"
+        # instantiation by shape alone -- both "5" and a type name pass
+        # _TEMPLATE_ARG_SHAPE_RE equally. Now that
+        # _classify_template_params() knows `template <typename T>
+        # struct Box` declares a TYPE parameter, "5" is rejected
+        # outright: no C++ overload resolution or local shadowing can
+        # ever make an integer literal a valid argument for a
+        # `typename` parameter, so this can never be a legitimate
+        # instantiation of THIS Box, whatever the surrounding text's
+        # real meaning is (a chained comparison, or anything else).
         names = self._run(
             "template <typename T> struct Box { T value; };\n"
             "void f(int Box, int threshold) { if (Box < 5 > threshold) {} }\n"
         )
+        self.assertEqual(names, [])
+
+    def test_accepts_integer_argument_for_a_non_type_template(self):
+        # The other half of the same fix: a template that genuinely
+        # declares a non-type parameter still resolves a real integer
+        # argument correctly -- the fix rejects a MISMATCHED kind, not
+        # integer arguments in general.
+        names = self._run(
+            "template <int N> struct Box { int value = N; };\n"
+            "Box<5> instance;\n"
+        )
         self.assertEqual(names, ["Box<5>"])
+
+    def test_rejects_type_argument_for_a_non_type_template(self):
+        # The symmetric mismatch: a plain type name where a non-type
+        # parameter is declared is equally never a legitimate
+        # instantiation.
+        names = self._run(
+            "template <int N> struct Box { int value = N; };\n"
+            "template <typename T> struct Wrap { T value; };\n"
+            "Box<Wrap> bad;\n"
+        )
+        self.assertEqual(names, [])
+
+    def test_falls_back_to_shape_only_check_for_unclassifiable_template_params(self):
+        # A template-template parameter (or any parameter list this
+        # scanner doesn't recognize) makes _classify_template_params()
+        # give up -- callers must fall back to the old, kind-agnostic
+        # shape check for THAT template, not reject everything.
+        names = self._run(
+            "template <typename T> struct Box { T value; };\n"
+            "template <template <typename> class Container> struct Wrap { };\n"
+            "Wrap<Box> instance;\n"
+        )
+        self.assertIn("Wrap<Box>", names)
 
 
 class TestEmitDriver(unittest.TestCase):
@@ -418,6 +452,28 @@ class TestEndToEndExtraction(unittest.TestCase):
             'REFLECT_DWARF_CLASS_BEGIN(4, "Box<Box<int> >", Box<Box<int> >)', out
         )
         self.assertIn('REFLECT_DWARF_MEMBER("value", "Box<int>", 0, 4, 1)', out)
+
+    def test_non_type_template_instantiation_resolves_correctly(self):
+        # Regression test for the OTHER direction of the
+        # chained-comparison fix: a template with a genuine non-type
+        # parameter must still discover and resolve its real
+        # instantiation via DWARF -- classifying a declared parameter's
+        # kind must reject a MISMATCHED argument without also
+        # rejecting a matching, legitimate one.
+        out = self._extract(
+            "template <int N> struct Box { int value = N; };\n"
+            "Box<5> instance;\n"
+        )
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(4, "Box<5>", Box<5>)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("value", "int", 0, 4, 1)', out)
+
+    def test_mixed_type_and_nontype_template_instantiation_resolves_correctly(self):
+        out = self._extract(
+            "template <typename T, int N> struct Box { T value = N; };\n"
+            "Box<int, 5> instance;\n"
+        )
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(4, "Box<int, 5>", Box<int, 5>)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("value", "int", 0, 4, 1)', out)
 
     def test_std_array_member_resolves_via_its_own_structure_type(self):
         # std::array<T, N> is a real class wrapping a C array internally

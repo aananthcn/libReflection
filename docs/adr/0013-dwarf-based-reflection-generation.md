@@ -2,13 +2,14 @@
 
 **Status:** Implemented and verified — on the Linux host, via the QNX
 SDP 8.0 cross-toolchain (`x86_64` and `aarch64`), and by running on a
-real QNX 8.0 aarch64 device (not just cross-compiled). 40 Python tests
+real QNX 8.0 aarch64 device (not just cross-compiled). 45 Python tests
 in `tools/test_generate_dwarf_reflection.py`. See "Fixed bugs" for the
 virtual-base-class bug (a serious one — silently zero members), the
 vtable-pointer exposure, the flags-mirroring gap, template discovery
-(including nested template arguments), and the silently-absent-skip
-build warning, all now fixed/closed, and "Known limitations" for
-what's still open.
+(including nested template arguments and the chained-comparison
+ambiguity), and the silently-absent-skip build warning, all now
+fixed/closed. No known limitations remain open — see "Known
+limitations" for the one positive note left there.
 
 ## Context
 
@@ -54,10 +55,10 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
    touch-instantiated (no template argument is known there), so the
    same file set is searched again for actual USES of each discovered
    template (e.g. `Box<int> value;`, or a nested one like
-   `Box<Box<int>>`) instead — see "Fixed bugs" for how this works
-   (a bracket-depth scanner, not a regex, is what makes nesting work)
-   and its residual risks. Enums are not discovered yet (see "Future
-   work").
+   `Box<Box<int>>`) instead — see "Fixed bugs" for how this works (a
+   bracket-depth scanner, not a regex, is what makes nesting work, and
+   each argument's kind is checked against the template's own declared
+   parameter kinds). Enums are not discovered yet (see "Future work").
 2. **Emit a driver**: a throwaway `.cpp` that `#include`s `SOURCE` and
    declares one instance of each discovered type, to force the
    compiler to emit that type's *full* DWARF (a type merely named in
@@ -144,18 +145,8 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
 
 ## Known limitations, stated plainly
 
-- **A chained relational comparison shaped exactly like a
-  single-argument template use with an integer-literal argument** (e.g.
-  `Box < 5 > threshold`) is indistinguishable from a genuine non-type
-  template instantiation `Box<5>` by text alone, and is *not* filtered
-  out — see `tools/test_generate_dwarf_reflection.py`'s
-  `test_known_residual_risk_of_bare_integer_comparison`, which records
-  this as an accepted, understood trade-off. Low real-world risk
-  (unparenthesized chained comparisons are rare and usually already
-  flagged by `-Wparentheses`), and the failure mode if it ever happens
-  is a **loud, hard compile error** in the generated driver (a name
-  that isn't actually a template instantiation fails to compile) —
-  never silently wrong reflection data.
+None currently open — see "Fixed bugs" for what used to be here.
+
 - **No member-ordering risk** (unlike [0012](0012-generated-reflection-names.md)'s
   text scanner): DWARF gives an explicit, unambiguous offset per named
   member directly.
@@ -256,9 +247,10 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   against real compiled output) so `find_type()`'s later exact-string
   lookup matches; an argument that doesn't look like a plausible
   type/literal (`_TEMPLATE_ARG_SHAPE_RE`) is abstained on, not guessed
-  at — see "Known limitations" for the one residual risk this still
-  leaves. (A nested template argument, e.g. `Box<Box<int>>`'s outer
-  layer, was ALSO abstained on at this point — fixed separately below.)
+  at. (A nested template argument, e.g. `Box<Box<int>>`'s outer layer,
+  and a mismatched argument KIND for the template's own declared
+  parameters, e.g. `Box<5>` for a `typename`-only template, were ALSO
+  not caught at this point — both fixed separately below.)
 
   **A second, compounding bug found while building this**: a
   multi-argument instantiation's canonical name has a top-level comma
@@ -324,6 +316,44 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   `test_resolves_nested_instantiation_as_one_of_several_arguments`,
   `test_abstains_on_a_nested_instantiation_with_trailing_junk`, and
   `test_nested_template_instantiation_resolves_correctly`.
+- **A chained relational comparison shaped exactly like a
+  single-argument template use with an integer-literal argument** (e.g.
+  `Box < 5 > threshold`) was indistinguishable from a genuine non-type
+  template instantiation `Box<5>` by shape alone: `_TEMPLATE_ARG_SHAPE_RE`
+  accepted both a type name and a bare integer literal equally, with no
+  way to tell which one a GIVEN template actually expects. **Fixed** by
+  giving the shape check something to check the argument's kind
+  *against*: `_classify_template_params()` parses each discovered
+  template's own declared parameter list (captured by
+  `_TEMPLATE_HEADER_RE`) into an ordered `(kind, is_pack)` list — `kind`
+  is `"type"` for a `typename`/`class` parameter or `"nontype"` for one
+  declared with a recognized numeric/bool/`auto` keyword — and
+  `_arg_kind()` classifies each argument the same way (an integer/bool
+  literal is `"nontype"`, everything else `_TEMPLATE_ARG_SHAPE_RE`/
+  `_NESTED_ARG_HEAD_RE` accept is `"type"`). `_normalize_arg_list()` now
+  rejects a use whose argument kind doesn't match the DECLARED
+  parameter's kind at that position (`_param_kind_at()`, letting a
+  trailing pack absorb further positions) — so `Box < 5 > threshold`
+  for `template <typename T> struct Box` is now correctly rejected
+  outright: no C++ overload resolution or local shadowing can ever make
+  an integer literal a valid argument for a `typename` parameter,
+  regardless of what the surrounding text's real meaning is. A
+  template whose parameter list can't be confidently classified (a
+  template-template parameter, or any shape this scanner doesn't
+  recognize) falls back to the previous, kind-agnostic shape check for
+  that template only — never rejects (or accepts) more than before out
+  of a bad guess at the template's own signature. Verified end to end
+  that a genuine non-type instantiation (`Box<5>` for
+  `template <int N> struct Box`) and a mixed type/non-type one
+  (`Box<int, 5>` for `template <typename T, int N> struct Box`) still
+  resolve correctly — the fix rejects a MISMATCHED kind, not integer
+  arguments in general. Covered by
+  `test_rejects_bare_integer_argument_for_a_type_only_template`,
+  `test_accepts_integer_argument_for_a_non_type_template`,
+  `test_rejects_type_argument_for_a_non_type_template`,
+  `test_falls_back_to_shape_only_check_for_unclassifiable_template_params`,
+  `test_non_type_template_instantiation_resolves_correctly`, and
+  `test_mixed_type_and_nontype_template_instantiation_resolves_correctly`.
 - **A truly unresolvable member's type, or a whole type not found in
   DWARF at all, was silently absent — noted only in a `//` comment
   inside a generated file nobody reads, never surfaced at build time.**

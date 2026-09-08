@@ -98,12 +98,17 @@ LOCAL_INCLUDE_RE = re.compile(r'#\s*include\s*"([^"]+)"')
 # alone) -- a "struct/class Name" immediately preceded by a
 # template<...> parameter list is excluded from the plain type-name
 # list. Its base NAME is tracked separately (see
-# discover_type_names()) so actual USES of it elsewhere in the source
-# -- e.g. "Box<int> value;" -- can be found and touched instead;
-# generating "Name touch_Name;" for a bare template name (no
-# arguments) is a compile error (verified), not a gracefully-skipped
-# case.
-_TEMPLATE_PRECEDING_RE = re.compile(r"template\s*<[^;{}]*>\s*$")
+# discover_type_names()), AND its parameter-list text is captured
+# (group 1) so _classify_template_params() can later tell a type
+# parameter ("typename T") from a non-type one ("int N") -- this is
+# what lets a USE's arguments be checked against the right EXPECTED
+# kind per position, not just checked in isolation for "looks like a
+# plausible type or literal" (see _TEMPLATE_ARG_SHAPE_RE) -- so actual
+# USES of it elsewhere in the source -- e.g. "Box<int> value;" -- can
+# be found and touched instead; generating "Name touch_Name;" for a
+# bare template name (no arguments) is a compile error (verified), not
+# a gracefully-skipped case.
+_TEMPLATE_HEADER_RE = re.compile(r"template\s*<([^;{}]*)>\s*$")
 
 # Matches just a known template name immediately followed by "<" -- the
 # OPENING of its argument list. The argument list itself (which may
@@ -168,6 +173,105 @@ _TEMPLATE_ARG_SHAPE_RE = re.compile(r"^[\w:\s*&-]+$")
 # against _TEMPLATE_ARG_SHAPE_RE instead).
 _NESTED_ARG_HEAD_RE = re.compile(r"^([\w:]+)\s*<")
 
+# An argument accepted by _TEMPLATE_ARG_SHAPE_RE is either a NON-TYPE
+# value (an integer or boolean literal -- the only such shapes this
+# scanner accepts) or a TYPE name; _arg_kind() tells the two apart so
+# they can be checked against the declared template PARAMETER's own
+# kind (see _classify_template_params()) -- this is the actual fix for
+# "Box < 5 > threshold" being indistinguishable from `Box<5>` by shape
+# alone (see docs/adr/0013): "5" only READS as a plausible non-type
+# argument for a template that actually DECLARES a non-type parameter
+# there. For `template <typename T> struct Box`, "5" can never be a
+# valid argument regardless of any comparison/declaration ambiguity --
+# no C++ overload resolution or shadowing changes that -- so it's
+# always correct to reject it outright, never a guess.
+_INTEGER_LITERAL_RE = re.compile(r"^[+-]?(?:0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)$")
+_BOOL_LITERAL_RE = re.compile(r"^(?:true|false)$")
+
+
+def _arg_kind(normalized_arg: str) -> str:
+    """Classifies one already-normalized, already-shape-validated
+    template argument as "nontype" (an integer or boolean literal) or
+    "type" (everything else _TEMPLATE_ARG_SHAPE_RE/_NESTED_ARG_HEAD_RE
+    accept: a plain or qualified type name, pointer/reference-decorated
+    or not, or a nested template instantiation)."""
+    if _INTEGER_LITERAL_RE.match(normalized_arg) or _BOOL_LITERAL_RE.match(normalized_arg):
+        return "nontype"
+    return "type"
+
+
+# Keywords that start a NON-TYPE template parameter's declared type
+# (e.g. "int N", "unsigned long Flags", "bool Enabled", "auto V" for a
+# C++17 placeholder non-type parameter) -- deliberately NOT exhaustive:
+# anything not on this list, and not starting with "typename"/"class"
+# either, makes _classify_template_params() give up on the WHOLE
+# template (fall back to the old kind-agnostic shape check for it, see
+# _normalize_arg_list) rather than guess a parameter's kind wrong.
+_NONTYPE_PARAM_KEYWORDS = (
+    "bool", "char", "char8_t", "char16_t", "char32_t", "wchar_t",
+    "short", "int", "long", "signed", "unsigned", "float", "double",
+    "size_t", "std::size_t", "ptrdiff_t", "std::ptrdiff_t", "auto",
+)
+_NONTYPE_PARAM_KEYWORD_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(k) for k in _NONTYPE_PARAM_KEYWORDS) + r")\b"
+)
+
+
+def _classify_template_params(params_text: str):
+    """Parses a template's declared parameter-list text (e.g.
+    "typename T" or "typename T, int N" -- the group 1 captured by
+    _TEMPLATE_HEADER_RE) into an ordered list of (kind, is_pack) pairs,
+    kind being "type" (a `typename`/`class` parameter) or "nontype" (a
+    parameter declared with one of _NONTYPE_PARAM_KEYWORDS). Returns
+    None if ANY parameter's kind can't be confidently determined (a
+    template-template parameter, e.g. "template <typename> class C";
+    an unrecognized non-type parameter type; or simply unparseable) --
+    callers must then skip kind-matching for this template entirely
+    (fall back to the previous, kind-agnostic behavior), never reject
+    (or accept) more than the old behavior did out of a bad guess at
+    the template's own signature.
+
+    A default value ("typename U = T") only affects whether that
+    parameter is OPTIONAL in a real instantiation, not its kind --
+    stripped before classifying. A pack ("typename... Ts", "int... Ns")
+    is marked is_pack=True, so _param_kind_at() can let it absorb any
+    number of trailing arguments of that same kind."""
+    kinds = []
+    for raw in _split_top_level_args(params_text):
+        chunk = raw.strip()
+        if not chunk:
+            return None
+        chunk = chunk.split("=", 1)[0].strip()  # drop a default value
+        is_pack = "..." in chunk
+        if is_pack:
+            chunk = chunk.replace("...", " ")
+        chunk = re.sub(r"\s+", " ", chunk).strip()
+        if not chunk:
+            return None
+        first_word = chunk.split(" ", 1)[0]
+        if first_word in ("typename", "class"):
+            kinds.append(("type", is_pack))
+        elif _NONTYPE_PARAM_KEYWORD_RE.match(chunk):
+            kinds.append(("nontype", is_pack))
+        else:
+            return None
+    return kinds or None
+
+
+def _param_kind_at(param_kinds, index: int):
+    """Returns the declared (kind, is_pack) for parameter position
+    index, letting a TRAILING pack (is_pack=True on the last declared
+    parameter) absorb any number of further positions -- or None if
+    index is out of range and there's no trailing pack, meaning the
+    use provides MORE explicit arguments than this template declares
+    at all: never a legitimate instantiation, whatever the arguments'
+    own shapes look like."""
+    if index < len(param_kinds):
+        return param_kinds[index]
+    if param_kinds and param_kinds[-1][1]:
+        return param_kinds[-1]
+    return None
+
 
 def _split_top_level_args(args_str: str):
     """Splits a template argument-list's raw text on commas at bracket
@@ -193,15 +297,23 @@ def _split_top_level_args(args_str: str):
     return parts
 
 
-def _normalize_arg(arg: str):
+def _normalize_arg(arg: str, template_kinds: dict):
     """Validates and normalizes ONE template argument -- either a leaf
     (a plain type/literal, see _TEMPLATE_ARG_SHAPE_RE) or a nested
-    template instantiation (recursing through this same machinery).
-    Returns the argument's normalized text (no brackets added yet --
-    the caller wraps it), or None to abstain: this argument's shape
-    isn't one this scanner trusts, so the WHOLE enclosing instantiation
-    is abandoned too (see _normalize_arg_list), never partially
-    guessed at."""
+    template instantiation (recursing through this same machinery,
+    checked against ITS OWN declared parameter kinds via
+    template_kinds -- see _normalize_arg_list). Returns the argument's
+    normalized text (no brackets added yet -- the caller wraps it), or
+    None to abstain: this argument's shape isn't one this scanner
+    trusts, so the WHOLE enclosing instantiation is abandoned too (see
+    _normalize_arg_list), never partially guessed at. template_kinds
+    maps a KNOWN template's name to its _classify_template_params()
+    result (or None if that template's own parameter kinds couldn't be
+    confidently determined) -- a name absent from it entirely (e.g.
+    `std::vector` as a nested argument, never itself discovered as a
+    local template declaration) is treated the same as None: no
+    kind-matching for arguments nested inside it, same as before this
+    per-parameter-kind check existed."""
     arg = arg.strip()
     if not arg:
         return None
@@ -220,19 +332,45 @@ def _normalize_arg(arg: str):
         # -- not a clean nested instantiation by itself, abstain rather
         # than guess which part of it is real.
         return None
-    inner = _normalize_arg_list(inner_text)
+    nested_name = head.group(1)
+    inner = _normalize_arg_list(inner_text, template_kinds, template_kinds.get(nested_name))
     if inner is None:
         return None
-    return f"{head.group(1)}<{inner}>"
+    return f"{nested_name}<{inner}>"
 
 
-def _normalize_arg_list(args_str: str):
+def _normalize_arg_list(args_str: str, template_kinds: dict, param_kinds=None):
     """Validates and normalizes every top-level argument in args_str
     (see _split_top_level_args), or returns None if any single one
     doesn't confidently resolve -- one bad argument abstains the whole
-    instantiation, never a partial guess."""
-    args = [_normalize_arg(a) for a in _split_top_level_args(args_str)]
-    if not args or any(a is None for a in args):
+    instantiation, never a partial guess.
+
+    param_kinds, if given (see _classify_template_params()), is the
+    enclosing template's own declared parameter kinds -- when present,
+    each argument's ACTUAL kind (_arg_kind(): "type" or "nontype") must
+    match the kind DECLARED at that position (_param_kind_at()), or the
+    whole instantiation is abandoned. This is what rejects
+    "Box < 5 > threshold" for `template <typename T> struct Box`: "5"
+    passes the plain shape check (_TEMPLATE_ARG_SHAPE_RE) but its kind
+    ("nontype") doesn't match the declared parameter's kind ("type") --
+    no C++ overload resolution or local shadowing can ever make an
+    integer literal a valid argument for a `typename` parameter, so
+    this is a correct rejection, never an overcautious guess. When
+    param_kinds is None (an unclassifiable or unknown template), no
+    kind-matching happens -- same permissive, shape-only behavior as
+    before this check existed."""
+    parts = _split_top_level_args(args_str)
+    args = []
+    for i, raw in enumerate(parts):
+        norm = _normalize_arg(raw, template_kinds)
+        if norm is None:
+            return None
+        if param_kinds is not None:
+            slot = _param_kind_at(param_kinds, i)
+            if slot is None or _arg_kind(norm) != slot[0]:
+                return None
+        args.append(norm)
+    if not args:
         return None
     return ", ".join(args)
 
@@ -257,30 +395,36 @@ def _close_adjacent_angle_brackets(spelling: str) -> str:
     return spelling
 
 
-def _normalize_template_instantiation(name: str, args_str: str):
+def _normalize_template_instantiation(name: str, args_str: str, template_kinds: dict):
     """Returns the canonical spelling GCC uses in DWARF for a template
     use's raw argument text (no space after "<", exactly one space
     after each comma, and see _close_adjacent_angle_brackets() for
     nested closing brackets), or None if any argument -- at any nesting
-    depth -- doesn't look like a plausible type/value: abstain rather
-    than emit an instantiation that can't possibly compile."""
-    args = _normalize_arg_list(args_str)
+    depth -- doesn't look like a plausible type/value FOR THE
+    PARAMETER DECLARED AT THAT POSITION (see _normalize_arg_list): a
+    stricter, no-cost improvement over checking each argument's shape
+    in isolation, since it's what actually resolves the
+    "Box < 5 > threshold" ambiguity (see docs/adr/0013's "Fixed
+    bugs")."""
+    args = _normalize_arg_list(args_str, template_kinds, template_kinds.get(name))
     if args is None:
         return None
     return _close_adjacent_angle_brackets(f"{name}<{args}>")
 
 
-def _scan_declarations(source_path: str, _visited=None, _texts=None):
+def _scan_declarations(source_path: str, _visited=None, _texts=None, _template_headers=None):
     """Recursive core of discover_type_names(): scans source_path, and
     every LOCAL ("...") header it #includes (transitively), for
     top-level struct/class declarations. System/library (<...>)
     includes are never followed. Returns (names, template_names) --
     template_names are tracked separately, not touch-instantiated
-    directly (see _TEMPLATE_PRECEDING_RE) -- and _texts (an
-    out-parameter dict, if given) accumulates each visited file's
-    comment/string-stripped text, keyed by resolved path, so a caller
-    can search the whole file set again for template USES without
-    re-reading anything from disk."""
+    directly (see _TEMPLATE_HEADER_RE) -- and _texts/_template_headers
+    (out-parameter dicts, if given) accumulate, respectively, each
+    visited file's comment/string-stripped text (keyed by resolved
+    path, so a caller can search the whole file set again for template
+    USES without re-reading anything from disk) and each discovered
+    template's raw parameter-list text (keyed by name, first
+    occurrence wins -- for _classify_template_params())."""
     if _visited is None:
         _visited = set()
     path = Path(source_path).resolve()
@@ -306,10 +450,13 @@ def _scan_declarations(source_path: str, _visited=None, _texts=None):
     seen_templates = set()
     for m in TYPE_DECL_RE.finditer(text):
         name = m.group(1)
-        if _TEMPLATE_PRECEDING_RE.search(text[:m.start()]):
+        header_m = _TEMPLATE_HEADER_RE.search(text[:m.start()])
+        if header_m:
             if name not in seen_templates:
                 seen_templates.add(name)
                 template_names.append(name)
+                if _template_headers is not None:
+                    _template_headers[name] = header_m.group(1)
             continue
         if name not in seen:
             seen.add(name)
@@ -317,7 +464,9 @@ def _scan_declarations(source_path: str, _visited=None, _texts=None):
 
     for m in LOCAL_INCLUDE_RE.finditer(comments_stripped):
         included = (path.parent / m.group(1)).resolve()
-        inc_names, inc_templates = _scan_declarations(str(included), _visited, _texts)
+        inc_names, inc_templates = _scan_declarations(
+            str(included), _visited, _texts, _template_headers
+        )
         for name in inc_names:
             if name not in seen:
                 seen.add(name)
@@ -352,12 +501,19 @@ def discover_type_names(source_path: str, _visited=None):
     list in its canonical spelling, matching how GCC names it in
     DWARF. A use this scanner can't confidently parse (an argument that
     doesn't look like a type, literal, or nested instantiation of a
-    plausible shape) is skipped, not guessed at."""
+    plausible shape FOR THE PARAMETER DECLARED AT THAT POSITION -- see
+    _classify_template_params()) is skipped, not guessed at."""
     visited = set() if _visited is None else _visited
     texts = {}
-    names, template_names = _scan_declarations(source_path, visited, texts)
+    template_headers = {}
+    names, template_names = _scan_declarations(source_path, visited, texts, template_headers)
     if not template_names:
         return names
+
+    template_kinds = {
+        name: _classify_template_params(template_headers.get(name, ""))
+        for name in template_names
+    }
 
     seen = set(names)
     for template_name in template_names:
@@ -369,7 +525,9 @@ def discover_type_names(source_path: str, _visited=None):
                 if result is None:
                     continue
                 args_text, _end = result
-                instantiation = _normalize_template_instantiation(template_name, args_text)
+                instantiation = _normalize_template_instantiation(
+                    template_name, args_text, template_kinds
+                )
                 if instantiation is None or instantiation in seen_instantiations:
                     continue
                 seen_instantiations.add(instantiation)
