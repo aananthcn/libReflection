@@ -14,6 +14,7 @@
 #include <iostream>
 
 
+// ----- Example Code Section Added by Aananth -------------
 // Not an aggregate at all (user-declared constructor) and has private
 // members. Neither automatic reflection nor REFLECT_CLASS_BEGIN
 // (without an intrusive friend declaration) could reach x/y -- but
@@ -48,7 +49,8 @@ struct Widget {
 // same declare-before-use rule as REFLECT_CLASS_BEGIN, see
 // docs/adr/0010) -- it defines the template specializations that make
 // the names below resolve.
-#include "generated_dwarf_reflection.hpp"
+#include "generated_dwarf_reflection.hpp" // *NOTE*: This file MUST be included after all class and struct declarations.
+
 
 static void check_this_aswell() {
     const auto& r2 = reflect::Reflect<PoorPoint>();
@@ -70,6 +72,7 @@ static void check_this_aswell() {
     }
     std::cout << std::endl;
 }
+// ----------------------------------------------------------
 
 
 int main() {

@@ -38,22 +38,29 @@ one aspect of using libReflection end to end. These are separate from
 - **`02_auto_reflect_legacy_struct/`** — automatic reflection alone
   (no DWARF pipeline here): zero annotation, but positional/sentinel
   names, showing the fallback `01_hello_world` improves on.
-- **`03_macros_for_special_cases/`** — `REFLECT_CLASS_BEGIN`/
-  `REFLECT_ENUM_BEGIN` written by hand, for the plain-automatic-
-  reflection path (this tutorial doesn't wire in
+- **`03_macros_for_special_cases/`** — `REFLECT_CLASS_BEGIN` written by
+  hand, for the plain-automatic-reflection path (this tutorial doesn't
+  wire in
   [0013](../docs/adr/0013-dwarf-based-reflection-generation.md)'s DWARF
-  pipeline at all): enums (still the only path — 0013 doesn't cover
-  these yet either), array members (0013's pipeline now resolves these
+  pipeline at all): array members (0013's pipeline now resolves these
   correctly too, if you use it — see its "Array-member bug found and
   fixed"; this tutorial keeps the manual version to illustrate the
-  automatic-aggregate-alone case), and non-aggregate types with public
-  members (0013 exists specifically for the private-member version of
-  this case).
+  automatic-aggregate-alone case), types wanting real distinguishable
+  names/identity, and non-aggregate types with public members (0013
+  exists specifically for the private-member version of this case).
 - **`04_dwarf_arrays/`** — the same DWARF pipeline as `01_hello_world/`,
   covering the array-shaped cases `03_macros_for_special_cases/` still
   needs annotation for: a direct fixed-size C array member, a
   multi-dimensional C array, and `std::array<T, N>` — all resolved
   with zero annotation.
+- **`05_enums/`** — everything enum-related, kept out of the other
+  tutorials on purpose. `REFLECT_ENUM_BEGIN` (the supported path —
+  neither automatic reflection nor
+  [0013](../docs/adr/0013-dwarf-based-reflection-generation.md)'s DWARF
+  pipeline covers enum value names), plus a zero-annotation C++20
+  enum↔string trick (`__PRETTY_FUNCTION__` slicing, no macro or table)
+  for when all you need is name lookup, and the scoped-vs-unscoped
+  contrast (`enum class` with a fixed underlying type, `using enum`).
 
 Add a new tutorial by creating `NN_name/` with its own `main.cpp` and a
 `CMakeLists.txt` modeled on an existing one (`cmake_minimum_required()`,

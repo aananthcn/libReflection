@@ -1,9 +1,10 @@
 // tutorials/01_hello_world and 02_auto_reflect_legacy_struct show the
 // *default* path: automatic reflection, no annotation. This tutorial
 // covers the cases that path can't (or shouldn't) handle, where
-// REFLECT_CLASS_BEGIN/REFLECT_ENUM_BEGIN remain the explicit,
-// deliberate choice. See docs/adr/0001-reflection-generation-strategy.md's
-// revision for the full reasoning behind each case below.
+// REFLECT_CLASS_BEGIN remains the explicit, deliberate choice. See
+// docs/adr/0001-reflection-generation-strategy.md's revision for the
+// full reasoning behind each case below. (Enums are their own case --
+// see tutorials/05_enums.)
 //
 // (An earlier text-scanning generator, tools/generate_reflection_names.py,
 // tried to automate real names for cases like these -- it was built,
@@ -14,16 +15,7 @@
 
 #include <iostream>
 
-// Case 1: enums. Enums are never aggregates, so there is no automatic
-// path at all -- REFLECT_ENUM_BEGIN is mandatory to recover value names.
-enum class Color { Red, Green, Blue };
-REFLECT_ENUM_BEGIN(Color)
-    REFLECT_ENUM_VALUE(Red)
-    REFLECT_ENUM_VALUE(Green)
-    REFLECT_ENUM_VALUE(Blue)
-REFLECT_ENUM_END()
-
-// Case 2: a direct fixed-size array member. Automatic reflection's
+// Case 1: a direct fixed-size array member. Automatic reflection's
 // member-count detection is provably ambiguous for these (see the ADR)
 // and refuses to compile rather than risk silently wrong offsets --
 // REFLECT_CLASS_BEGIN supports fixed-size arrays natively instead.
@@ -34,7 +26,7 @@ REFLECT_CLASS_BEGIN(Histogram)
     REFLECT_MEMBER(buckets)
 REFLECT_CLASS_END()
 
-// Case 3: real, distinguishable names/identity wanted. Automatically
+// Case 2: real, distinguishable names/identity wanted. Automatically
 // reflected types all share the name "<aggregate>", so two structurally
 // identical-but-different types would hash identically -- a real
 // concern for shared-memory IPC message types. Give a type a
@@ -50,7 +42,7 @@ REFLECT_CLASS_BEGIN(Vec3)
     REFLECT_MEMBER(z)
 REFLECT_CLASS_END()
 
-// Case 4: a class with a constructor and a method -- not an aggregate
+// Case 3: a class with a constructor and a method -- not an aggregate
 // at all, so automatic reflection can't touch it either. Its field is
 // public, so REFLECT_CLASS_BEGIN/REFLECT_MEMBER still work fine; only
 // a PRIVATE member would additionally need a friend declaration (see
@@ -72,10 +64,6 @@ REFLECT_CLASS_BEGIN(BoundedCounter)
 REFLECT_CLASS_END()
 
 int main() {
-    const auto& color = reflect::Reflect<Color>();
-    std::cout << "Color is an enum with " << color.GetEnumValues().size()
-              << " named values; Green = " << color.GetEnumValues().at("Green") << "\n";
-
     const auto& histogram = reflect::Reflect<Histogram>();
     const auto* buckets = histogram.FindMember("buckets");
     std::cout << "Histogram.buckets is an array of " << buckets->GetCount()

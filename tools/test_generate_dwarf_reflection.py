@@ -48,6 +48,18 @@ class TestDiscoverTypeNames(unittest.TestCase):
         names = self._run("// struct Fake { int a; };\nstruct Real { int b; };")
         self.assertEqual(names, ["Real"])
 
+    def test_excludes_scoped_enum_declarations(self):
+        # "enum class"/"enum struct" carry the class/struct keyword but
+        # are not reflectable classes -- discovering them makes DWARF
+        # extraction emit a spurious "entire type skipped" #warning.
+        names = self._run(
+            "enum class Direction : unsigned char { North, East };\n"
+            "enum struct Mode { A, B };\n"
+            "enum Plain { X, Y };\n"
+            "struct Real { int a; };\n"
+        )
+        self.assertEqual(names, ["Real"])
+
     def test_follows_local_quoted_include(self):
         with tempfile.TemporaryDirectory() as tmp:
             header = Path(tmp) / "Types.hpp"

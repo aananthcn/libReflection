@@ -18,6 +18,12 @@ written in or near the class — via the DWARF-based pipeline (see
   its real name too, not automatic reflection's `"<aggregate>"`
   fallback.
 
+Enums have their own dedicated tutorial —
+[`tutorials/05_enums`](../05_enums/README.md) — covering both the
+library's `REFLECT_ENUM_BEGIN` path and a zero-annotation C++20
+enum-to-string trick. They are kept out of this one so the "hello
+world" stays about class-member reflection only.
+
 This directory's `CMakeLists.txt` compiles `main.cpp` a second time
 with debug info, reads every type's real structure straight out of
 the resulting DWARF, and generates

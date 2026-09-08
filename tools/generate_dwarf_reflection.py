@@ -59,7 +59,16 @@ import subprocess
 import sys
 from pathlib import Path
 
-TYPE_DECL_RE = re.compile(r"\b(?:struct|class)\s+([A-Za-z_]\w*)\s*[:{]")
+# A scoped enum ("enum class" / "enum struct") also carries the
+# "class"/"struct" keyword, but it is not a reflectable class -- if it
+# were discovered here, DWARF extraction would later find an
+# enumeration DIE instead of a structure/class one and emit a spurious
+# "entire type skipped" #warning for a type that was never meant to be
+# reflected. The optional "enum" prefix is captured so the scan can
+# skip those matches.
+TYPE_DECL_RE = re.compile(
+    r"\b(?P<enum>enum\s+)?(?:struct|class)\s+(?P<name>[A-Za-z_]\w*)\s*[:{]"
+)
 
 DIE_RE = re.compile(
     r"^\s*<(\d+)><([0-9a-fA-F]+)>:\s*Abbrev Number:\s*\d+(?:\s*\(([^)]+)\))?"
@@ -449,7 +458,9 @@ def _scan_declarations(source_path: str, _visited=None, _texts=None, _template_h
     seen = set()
     seen_templates = set()
     for m in TYPE_DECL_RE.finditer(text):
-        name = m.group(1)
+        if m.group("enum"):
+            continue
+        name = m.group("name")
         header_m = _TEMPLATE_HEADER_RE.search(text[:m.start()])
         if header_m:
             if name not in seen_templates:
