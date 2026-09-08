@@ -20,6 +20,7 @@ ADRs assume earlier decisions.
 | [0011](0011-tutorials-and-their-purpose.md) | `tutorials/`'s purpose and its standalone-CMake-project structure | Decided; revised twice |
 | [0012](0012-generated-reflection-names.md) | Text-scanning generator for real names (aggregates only) | **REVERTED** — wrong founding assumption |
 | [0013](0013-dwarf-based-reflection-generation.md) | DWARF-based reflection generation (reaches private members too) | **Implemented and verified** — see `tutorials/01_hello_world/` |
+| [0014](0014-aggregate-tie-code-generation.md) | `tools/generate_aggregate_tie.py` → `src/AggregateTie.generated.hpp`, and why the aggregate field cap starts at 64 | Decided |
 
 Only 0001 was a question put to the user (it fixes the shape of the
 public annotation API that all downstream code will depend on). The
