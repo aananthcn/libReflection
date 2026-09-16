@@ -3,6 +3,7 @@ build-qnx*/
 /tutorials/build/
 /tutorials/*/build/
 /release/dist/
+/release/artifacts/
 *.o
 *.a
 dist/

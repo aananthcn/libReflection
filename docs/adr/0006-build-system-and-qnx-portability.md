@@ -48,13 +48,21 @@ mechanically, or whether the given tree is exhaustive.
   here, since 0009 is specifically the ADR about versioning).
 - **`release/`** is a source-tracked folder for release-specific
   **scripts and documents**, plus the destination for packaged release
-  **artifacts** (binaries). It is not merely a CMake
-  `CMAKE_INSTALL_PREFIX`: `release/scripts/package.sh` is a checked-in
-  script that invokes `cmake --install` into a versioned, gitignored
-  `release/dist/` subfolder and tars the result — so the scripts/docs
-  under `release/` are tracked, while the binaries `package.sh`
-  produces under `release/dist/` are not (they're build output, kept
-  out of git the same way `build/` is).
+  **artifacts** (binaries, and now source snapshots too). It is not
+  merely a CMake `CMAKE_INSTALL_PREFIX`: `release/scripts/package.sh`
+  is a checked-in script that invokes `cmake --install` into a
+  versioned, gitignored `release/dist/` subfolder and tars the result
+  — so the scripts/docs under `release/` are tracked, while the
+  binaries `package.sh` produces under `release/dist/` are not (they're
+  build output, kept out of git the same way `build/` is).
+  `release/scripts/create-release-source-bundle.sh` is the same idea
+  for a *source* snapshot instead of a build: it asks
+  `git ls-files --cached --others --exclude-standard` for the exact
+  set of files `.gitignore` doesn't exclude (deferring to git's own
+  ignore engine rather than reimplementing its pattern syntax) and
+  zips them into gitignored `release/artifacts/libReflection-<version>.zip`
+  — see [0009](0009-library-versioning.md) for why a version-tagged
+  source snapshot matters here specifically.
 - **Folder layout deviations from ARCHITECTURE.md, all additive:**
   - `tests/` (not in the original tree) — required to verify the
     library at all; see [0007](0007-testing-strategy.md).

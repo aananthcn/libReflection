@@ -27,3 +27,21 @@ in git) and is the destination for packaged release **artifacts**
 4. Publish/distribute the resulting tarball(s) however this project's
    release channel works; `release/dist/` itself is a local, gitignored
    staging area, not a distribution point.
+
+## Bundling the source tree
+
+`release/scripts/create-release-source-bundle.sh` is unrelated to the
+build/package steps above — it snapshots the *source*, not a build,
+for whenever that's what's needed instead (e.g. handing someone a
+clean copy without a `git clone`):
+
+```sh
+./scripts/create-release-source-bundle.sh
+```
+
+Produces `release/artifacts/libReflection-<version>.zip` (version from
+`../version.txt`) containing every file `.gitignore` doesn't exclude —
+asks `git ls-files` for that list rather than reimplementing gitignore
+pattern matching, so it can never silently disagree with `git status`.
+Like `release/dist/`, `release/artifacts/` is a local, gitignored
+staging area.

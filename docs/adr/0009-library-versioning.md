@@ -16,6 +16,17 @@ what that's for and why it's a wholly separate concept from a release
 version number). ARCHITECTURE.md requires a `version.txt` but doesn't
 say its exact format or how it's consumed.
 
+**Why it's bumped, in practice:** each bump marks a specific snapshot
+of this codebase that was actually handed to a downstream user or team
+— e.g. the `0.8.0` bump that shipped to the SerLib team. It's the
+project's own record of "what did person/team X actually receive,
+and when" — not a semantic-versioning signal about API compatibility.
+This is also why [0006](0006-build-system-and-qnx-portability.md)'s
+`release/scripts/create-release-source-bundle.sh` names its output
+`libReflection-<version>.zip` directly from this file: the version
+bump and the snapshot that gets shared are meant to happen together,
+one identifying the other after the fact.
+
 ## Decision
 
 `version.txt` holds a bare `MAJOR.MINOR.PATCH` string (e.g. `0.1.0` —
