@@ -276,6 +276,149 @@ class TestEmitDriver(unittest.TestCase):
         self.assertNotIn("reflect_dwarf_extraction_touch", content)
 
 
+class TestFindUnreachableReflectTargets(unittest.TestCase):
+    def _run(self, source_text: str, filename="main.cpp", include_dirs=()):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._tmp = tmp
+            source = Path(tmp) / filename
+            source.write_text(source_text)
+            return gen.find_unreachable_reflect_targets(str(source), include_dirs)
+
+    def test_clean_for_locally_declared_type(self):
+        messages = self._run("struct A { int x; };\nvoid f() { reflect::Reflect<A>(); }")
+        self.assertEqual(messages, [])
+
+    def test_finds_type_only_reachable_through_local_include(self):
+        # Regression test for a real bug found while building this:
+        # #include paths were being searched for in the SAME
+        # noise-stripped text used for struct/class scanning, which
+        # blanks out a quoted #include path as if it were an ordinary
+        # string literal (LOCAL_INCLUDE_RE's own comment already flags
+        # this exact mistake for discover_type_names() -- this lint's
+        # own traversal repeated it independently on first write).
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            (tmp_path / "Types.hpp").write_text("struct A { int x; };\n")
+            source = tmp_path / "main.cpp"
+            source.write_text(
+                '#include "Types.hpp"\nvoid f() { reflect::Reflect<A>(); }\n'
+            )
+            messages = gen.find_unreachable_reflect_targets(str(source))
+        self.assertEqual(messages, [])
+
+    def test_flags_type_reachable_only_through_system_include(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            include_dir = tmp_path / "include"
+            include_dir.mkdir()
+            (include_dir / "External.hpp").write_text("struct External { int x; };\n")
+            source = tmp_path / "main.cpp"
+            source.write_text(
+                '#include <External.hpp>\nvoid f() { reflect::Reflect<External>(); }\n'
+            )
+            messages = gen.find_unreachable_reflect_targets(
+                str(source), include_dirs=[str(include_dir)]
+            )
+        self.assertEqual(len(messages), 1)
+        self.assertIn("External", messages[0])
+        self.assertIn('only behind a "<...>" #include', messages[0])
+
+    def test_does_not_flag_system_include_type_when_include_dir_not_given(self):
+        # A "<...>" that doesn't resolve under any given include_dirs
+        # entry must be treated as a genuine external system/library
+        # header, never opened -- so with no include_dirs at all, this
+        # is indistinguishable from "not found anywhere", which is
+        # STILL correctly flagged (just as the other kind), never
+        # silently ignored.
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            include_dir = tmp_path / "include"
+            include_dir.mkdir()
+            (include_dir / "External.hpp").write_text("struct External { int x; };\n")
+            source = tmp_path / "main.cpp"
+            source.write_text(
+                '#include <External.hpp>\nvoid f() { reflect::Reflect<External>(); }\n'
+            )
+            messages = gen.find_unreachable_reflect_targets(str(source), include_dirs=[])
+        self.assertEqual(len(messages), 1)
+        self.assertIn("not declared as a struct/class anywhere", messages[0])
+
+    def test_flags_type_not_declared_anywhere(self):
+        messages = self._run("void f() { reflect::Reflect<NeverDefined>(); }")
+        self.assertEqual(len(messages), 1)
+        self.assertIn("NeverDefined", messages[0])
+        self.assertIn("not declared as a struct/class anywhere", messages[0])
+
+    def test_ignores_known_primitive_and_fixed_width_alias_leaves(self):
+        messages = self._run(
+            "void f() {\n"
+            "    reflect::Reflect<int>();\n"
+            "    reflect::Reflect<uint8_t>();\n"
+            "    reflect::Reflect<std::string>();\n"
+            "}\n"
+        )
+        self.assertEqual(messages, [])
+
+    def test_ignores_local_typedef_and_using_alias(self):
+        messages = self._run(
+            "typedef int MyAlias1;\n"
+            "using MyAlias2 = float;\n"
+            "void f() {\n"
+            "    reflect::Reflect<MyAlias1>();\n"
+            "    reflect::Reflect<MyAlias2>();\n"
+            "}\n"
+        )
+        self.assertEqual(messages, [])
+
+    def test_ignores_macro_registered_type_not_declared_as_a_plain_struct(self):
+        # A forward-declared-only type ("class Foo;") never matches
+        # TYPE_DECL_RE (no trailing "{"/":") -- registered_full is
+        # what should still keep this from being flagged.
+        messages = self._run(
+            "class Fwd;\n"
+            "REFLECT_CLASS_BEGIN(Fwd)\n"
+            "REFLECT_CLASS_END()\n"
+            "void f() { reflect::Reflect<Fwd>(); }\n"
+        )
+        self.assertEqual(messages, [])
+
+    def test_abstains_on_template_pointer_and_qualified_call_targets(self):
+        # Never this lint's job -- a template instantiation, pointer,
+        # or qualified name already has its own correct handling (a
+        # real TypeInfo<T> specialization, or DWARF's own template
+        # discovery) and can't be reliably classified from text alone
+        # without risking a false positive.
+        messages = self._run(
+            "void f() {\n"
+            "    reflect::Reflect<Box<int>>();\n"
+            "    reflect::Reflect<Undefined*>();\n"
+            "    reflect::Reflect<std::vector<int>>();\n"
+            "}\n"
+        )
+        self.assertEqual(messages, [])
+
+    def test_reports_the_correct_line_number_across_a_multiline_comment(self):
+        # The whole reason this lint has its own line-preserving noise
+        # stripper: a multi-line block comment must not shift later
+        # line numbers.
+        source_text = (
+            "/* line 1\n"
+            "   line 2\n"
+            "   line 3 */\n"
+            "void f() { reflect::Reflect<NeverDefined>(); }\n"
+        )
+        messages = self._run(source_text)
+        self.assertEqual(len(messages), 1)
+        self.assertIn(":4:", messages[0])
+
+    def test_ignores_reflect_call_inside_a_comment_or_string_literal(self):
+        messages = self._run(
+            '// reflect::Reflect<NeverDefined>();\n'
+            'void f() { const char* s = "reflect::Reflect<NeverDefined>()"; }\n'
+        )
+        self.assertEqual(messages, [])
+
+
 class TestParseName(unittest.TestCase):
     def test_plain_name_unwrapped(self):
         self.assertEqual(gen.parse_name("PoorPoint"), "PoorPoint")
@@ -299,6 +442,31 @@ class TestParseName(unittest.TestCase):
             gen.parse_name(raw),
             "basic_string<char, std::char_traits<char>, std::allocator<char> >",
         )
+
+
+class TestParseDwarfInt(unittest.TestCase):
+    def test_plain_decimal(self):
+        self.assertEqual(gen.parse_dwarf_int("48"), 48)
+
+    def test_hex_form(self):
+        # Regression test for a real bug: objdump renders
+        # DW_AT_byte_size/DW_AT_data_member_location in hex (a wider
+        # DWARF encoding form, e.g. DW_FORM_data4/data8) once the
+        # value doesn't fit a narrower one -- plain int(raw) (base 10)
+        # crashed with ValueError on exactly this, only ever exercised
+        # by a real struct/offset large enough to need that wider
+        # form (see docs/adr/0013's "Fixed bugs").
+        self.assertEqual(gen.parse_dwarf_int("0x123c8"), 0x123C8)
+
+    def test_missing_attribute_defaults_to_zero(self):
+        self.assertEqual(gen.parse_dwarf_int(None), 0)
+        self.assertEqual(gen.parse_dwarf_int(""), 0)
+
+    def test_int_passthrough(self):
+        # A caller's `attrs.get(..., 0) or 0`-style fallback may hand
+        # this an int, not a string -- must not crash trying to pass
+        # base=0 to int() on a non-string.
+        self.assertEqual(gen.parse_dwarf_int(0), 0)
 
 
 @unittest.skipUnless(has_toolchain(), "requires g++ and objdump on PATH")
@@ -338,6 +506,20 @@ class TestEndToEndExtraction(unittest.TestCase):
         self.assertIn('REFLECT_DWARF_MEMBER("x", "float", 0, 4, 1)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("y", "float", 4, 4, 1)', out)
         self.assertIn('REFLECT_DWARF_MEMBER("z", "float", 8, 4, 1)', out)
+
+    def test_large_struct_with_hex_encoded_byte_size_resolves_correctly(self):
+        # Regression test for a real bug, found via a real large
+        # legacy struct: GCC picks a wider DWARF encoding form
+        # (DW_FORM_data4/data8) for a byte_size/member-offset that
+        # doesn't fit a narrower one, and objdump renders THAT in hex,
+        # not decimal -- confirmed empirically for a struct at/above
+        # this size. parse_dwarf_int() (used for both attributes) used
+        # to be a plain, base-10-only int(raw), which crashed with
+        # ValueError on the hex form.
+        out = self._extract("struct Big { char data[100000]; int tail; };")
+        self.assertIn('REFLECT_DWARF_CLASS_BEGIN(100004, "Big", Big)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("data", "char[100000]", 0, 100000, 100000)', out)
+        self.assertIn('REFLECT_DWARF_MEMBER("tail", "int", 100000, 4, 1)', out)
 
     def test_private_members_resolve_with_correct_offsets(self):
         # The entire point of this tool: DWARF exposes private members,

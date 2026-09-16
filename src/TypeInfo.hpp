@@ -123,9 +123,26 @@ struct TypeInfo<T*> {
  * header) at the point this is instantiated, T reflects as a leaf
  * instead of using its registered shape. See docs/adr/0010
  * "declare-before-use ordering rule".
+ *
+ * REFLECTION_DWARF_DRIVER_BUILD short-circuits this to a dummy,
+ * never-inspected instance -- defined ONLY on the throwaway DWARF
+ * extraction driver's compile (cmake/GenerateDwarfReflection.cmake),
+ * never on a real target. That driver #includes a project's SOURCE
+ * verbatim purely to force full DWARF emission via a union-member
+ * "touch", which needs T to be a complete type but never needs
+ * TypeInfo<T>::Describe() to actually run -- so a Reflect<T>() call
+ * that happens to live in SOURCE (e.g. a type with a direct array
+ * member, which automatic aggregate reflection can't count -- see
+ * docs/adr/0001) no longer forces that primary-template fallback
+ * during the driver's bootstrap compile, before the generated header
+ * has real content. See docs/adr/0013's "Fixed bugs".
  */
 template <typename T>
 const ClassReflection& Reflect() {
+#ifdef REFLECTION_DWARF_DRIVER_BUILD
+    static const ClassReflection instance{};
+    return instance;
+#else
     static const ClassReflection instance = [] {
         ClassReflection r = TypeInfo<T>::Describe();
         r.hash = detail::ComputeHash(r);
@@ -133,6 +150,7 @@ const ClassReflection& Reflect() {
         return r;
     }();
     return instance;
+#endif
 }
 
 } // namespace reflect

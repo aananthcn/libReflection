@@ -1,15 +1,12 @@
-// Type definitions ONLY -- no reflect::Reflect<T>() calls anywhere in
-// this file. This is deliberate, not incidental: this header (not
-// main.cpp) is the SOURCE passed to reflection_generate_dwarf() below,
-// which means the extraction driver #includes THIS file to force
-// DWARF emission (see docs/adr/0013). If a reflect::Reflect<T>() call
-// for one of these array-containing types lived in the same file the
-// driver #includes, the driver's bootstrap compile (before the
-// generated header has real content yet) would fall back to automatic
-// aggregate reflection for it -- which correctly HARD-FAILS to compile
-// for a direct array member, by design (see docs/adr/0001). Keeping
-// the actual reflect::Reflect<T>() calls in main.cpp, a file the
-// driver never touches, avoids that entirely.
+// Type definitions for the array-shaped cases this tutorial covers.
+// main.cpp is the SOURCE passed to reflection_generate_dwarf() (see
+// CMakeLists.txt) and #includes this header locally, so every type
+// declared here is discovered automatically -- no listing required.
+//
+// reflect::Reflect<T>() calls for these types are free to live
+// anywhere, including directly in SOURCE itself (main.cpp does
+// exactly that) -- see docs/adr/0013's "Fixed bugs" for why that
+// used to be a real, must-avoid pitfall and no longer is.
 #pragma once
 
 #include <array>

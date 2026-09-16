@@ -8,7 +8,7 @@ reflection alone can't count one (see
 This tutorial wires in the same DWARF-based pipeline as
 [`tutorials/01_hello_world`](../01_hello_world/README.md)
 ([docs/adr/0013](../../docs/adr/0013-dwarf-based-reflection-generation.md))
-instead, which resolves all three of these with **zero annotation**:
+instead, which resolves all four of these with **zero annotation**:
 
 - **`Histogram`** — a direct fixed-size C array member (`int
   buckets[4];`). The same shape as tutorial 03's `Histogram`, but with
@@ -24,6 +24,25 @@ instead, which resolves all three of these with **zero annotation**:
   already carries a name and size directly — this needed no special
   handling in the DWARF pipeline at all, unlike the raw C-array case
   above.
+- **`Meter`** (`ArrayTypeNested.hpp`) — a direct fixed-size array
+  member reached two levels down, via `Meter::history`'s type
+  (`Buckets`) rather than on `Meter` itself. Resolves the same way;
+  automatic aggregate reflection recurses into every un-annotated
+  member type, so it doesn't matter how deep the array member is.
+
+`main.cpp` is itself the `SOURCE` passed to `reflection_generate_dwarf()`
+(see `CMakeLists.txt`), and calls `reflect::Reflect<T>()` directly for
+all four types, including `Meter`. That used to be disallowed for any
+type reaching a direct array member — the extraction driver `#include`s
+`SOURCE` verbatim to force DWARF emission, and used to compile it
+*before* the generated header had real content, so such a call fell
+back to automatic aggregate reflection instead and hard-failed (see
+[docs/adr/0001](../../docs/adr/0001-reflection-generation-strategy.md)).
+Fixed by making `reflect::Reflect<T>()` a no-op under
+`REFLECTION_DWARF_DRIVER_BUILD` (`src/TypeInfo.hpp`) during that one
+throwaway bootstrap compile — see
+[docs/adr/0013](../../docs/adr/0013-dwarf-based-reflection-generation.md)'s
+"Fixed bugs".
 
 Standalone — no other build step needed first:
 

@@ -21,6 +21,7 @@ ADRs assume earlier decisions.
 | [0012](0012-generated-reflection-names.md) | Text-scanning generator for real names (aggregates only) | **REVERTED** — wrong founding assumption |
 | [0013](0013-dwarf-based-reflection-generation.md) | DWARF-based reflection generation (reaches private members too) | **Implemented and verified** — see `tutorials/01_hello_world/` |
 | [0014](0014-aggregate-tie-code-generation.md) | `tools/generate_aggregate_tie.py` → `src/AggregateTie.generated.hpp`, and why the aggregate field cap starts at 64 | Decided |
+| [0015](0015-reflect-reachability-lint.md) | Build-time lint for a `reflect::Reflect<T>()` call the DWARF pipeline can't actually reach | Decided and implemented |
 
 Only 0001 was a question put to the user (it fixes the shape of the
 public annotation API that all downstream code will depend on). The

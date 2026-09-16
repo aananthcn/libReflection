@@ -8,6 +8,13 @@
 #
 # Pipeline (all of it runs automatically as part of a normal build --
 # no separate manual step):
+#   0. Lint SOURCE for a reflect::Reflect<T>() call this pipeline's
+#      discovery step won't actually be able to reach -- a hard build
+#      error (see generate_dwarf_reflection.py's "--lint" section),
+#      so a real problem surfaces with a clear message here rather
+#      than as a confusing template-instantiation error wall from step
+#      3's compile, or (worse) a silent loss of real names/hash-
+#      identity that never fails the build at all.
 #   1. Scan SOURCE (and any local "..." headers it includes) for
 #      struct/class names -- just names, DWARF handles everything else.
 #   2. Emit a throwaway "driver" .cpp that #includes SOURCE and
@@ -39,15 +46,17 @@
 # automatically on first configure so this never fails to compile
 # before extraction has run once.
 #
-# CAUTION: because step 2 #includes SOURCE verbatim, SOURCE itself must
-# not call reflect::Reflect<T>() for a type automatic aggregate
-# reflection would hard-fail to compile (e.g. one with a direct array
-# member) -- the driver's bootstrap compile (before the generated
-# header has real content) falls back to that primary template, not
-# the DWARF specialization. See docs/adr/0013's "Known open risks" and
-# tutorials/04_dwarf_arrays, which keeps array-containing type
-# definitions in a separate header with no reflect::Reflect<T>() calls
-# in it, precisely to avoid this.
+# NOTE: step 2 #includes SOURCE verbatim, so if SOURCE itself calls
+# reflect::Reflect<T>() for some T (e.g. a type with a direct array
+# member, which automatic aggregate reflection can't count -- see
+# docs/adr/0001), that call gets compiled as part of the driver's
+# bootstrap compile too, before the generated header has real content.
+# This used to be a real, must-avoid pitfall (see
+# tutorials/04_dwarf_arrays/pitfall/), fixed by having Reflect<T>()
+# itself become a no-op under REFLECTION_DWARF_DRIVER_BUILD (defined
+# below, only on the driver target) -- the driver never needs
+# Reflect<T>()'s result, only T's complete-type "touch", so SOURCE no
+# longer needs to avoid calling it. See docs/adr/0013's "Fixed bugs".
 #
 # Expects REFLECTION_ROOT_DIR to already be set, and
 # BuildReflectionLibrary.cmake to have already been include()'d (which
@@ -74,11 +83,44 @@ function(reflection_generate_dwarf)
         file(WRITE "${generated_header}" "#pragma once\n")
     endif()
 
+    # Fails the build (hard error, one line per finding) if SOURCE
+    # contains a reflect::Reflect<T>() call for a struct/class T this
+    # pipeline's discovery step can't actually reach -- see
+    # generate_dwarf_reflection.py's "--lint" section. The real
+    # target's own include directories are needed so a "<...>"
+    # #include that actually resolves to a local project header (vs.
+    # a genuine external system/library one) is recognized as such;
+    # written to a file via file(GENERATE), not spliced into the
+    # custom command's own argv, for the same reason step 3 below
+    # compiles the driver as a real OBJECT target instead of
+    # hand-splicing flags into a command string -- verified in that
+    # case (see docs/adr/0013's "Fixed bugs") that the Unix Makefiles
+    # generator does not reliably split a genex-expanded list passed
+    # that way.
+    set(lint_include_dirs_file "${CMAKE_CURRENT_BINARY_DIR}/${ARG_TARGET}_reflect_lint_include_dirs.txt")
+    file(GENERATE OUTPUT "${lint_include_dirs_file}" CONTENT
+"${REFLECTION_ROOT_DIR}/src
+${CMAKE_CURRENT_BINARY_DIR}
+${REFLECTION_GENERATED_INCLUDE_DIR}
+$<JOIN:$<TARGET_PROPERTY:${ARG_TARGET},INCLUDE_DIRECTORIES>,\n>
+"
+    )
+    set(lint_stamp "${CMAKE_CURRENT_BINARY_DIR}/${ARG_TARGET}_reflect_lint.stamp")
+    add_custom_command(
+        OUTPUT "${lint_stamp}"
+        COMMAND "${Python3_EXECUTABLE}" "${script}" --lint "${source_abs}"
+                --include-dirs-file "${lint_include_dirs_file}"
+        COMMAND "${CMAKE_COMMAND}" -E touch "${lint_stamp}"
+        DEPENDS "${script}" "${source_abs}" "${lint_include_dirs_file}"
+        COMMENT "Checking ${ARG_SOURCE} for unreachable reflect::Reflect<T>() targets"
+        VERBATIM
+    )
+
     set(driver_cpp "${CMAKE_CURRENT_BINARY_DIR}/dwarf_extraction_driver_${ARG_TARGET}.cpp")
     add_custom_command(
         OUTPUT "${driver_cpp}"
         COMMAND "${Python3_EXECUTABLE}" "${script}" --emit-driver "${source_abs}" "${driver_cpp}"
-        DEPENDS "${script}" "${source_abs}"
+        DEPENDS "${script}" "${source_abs}" "${lint_stamp}"
         COMMENT "Discovering reflectable types in ${ARG_SOURCE}"
         VERBATIM
     )
@@ -104,7 +146,11 @@ function(reflection_generate_dwarf)
     # risk (a fixed flag set only, with no such guarantee).
     set(driver_target "${ARG_TARGET}_dwarf_extraction_driver")
     add_library(${driver_target} OBJECT "${driver_cpp}")
+    # REFLECTION_DWARF_DRIVER_BUILD turns reflect::Reflect<T>() into a
+    # no-op (src/TypeInfo.hpp) for this driver-only compile -- see the
+    # NOTE above. Defined only here, never on ARG_TARGET's own compile.
     target_compile_definitions(${driver_target} PRIVATE
+        REFLECTION_DWARF_DRIVER_BUILD=1
         $<TARGET_PROPERTY:${ARG_TARGET},COMPILE_DEFINITIONS>
     )
     target_include_directories(${driver_target} PRIVATE

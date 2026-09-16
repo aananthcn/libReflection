@@ -110,15 +110,24 @@ DW_TAG_class_type: DW_AT_name: EncapsulatedPoint, DW_AT_byte_size: 8
   type definitions — the same declare-before-use rule
   `REFLECT_CLASS_BEGIN`'s output follows (see
   [0010](0010-header-and-macro-sketch.md)).
-- Must **not** itself call `reflect::Reflect<T>()` for a type automatic
-  aggregate reflection would hard-fail to compile (e.g. a direct array
-  member). Step 2's driver `#include`s `SOURCE` verbatim, so on a fresh
-  build — before the generated header has real content — that call
-  resolves against the *unspecialized* primary template instead, and
-  the bootstrap compile fails. Keep such types' definitions in a
-  separate header with no `Reflect<T>()` calls in it (see
-  `tutorials/04_dwarf_arrays/ArrayTypes.hpp`); a type automatic
-  reflection *can* describe (even with positional names) is unaffected.
+- May freely call `reflect::Reflect<T>()` for any type, including one
+  automatic aggregate reflection alone would hard-fail to compile
+  (e.g. a direct array member) — see "Fixed bugs"'s
+  `REFLECTION_DWARF_DRIVER_BUILD` entry. This used to be a hard
+  restriction (step 2's driver `#include`s `SOURCE` verbatim, and used
+  to compile it before the generated header had real content, so such
+  a call resolved against the unspecialized primary template and
+  failed); `tutorials/04_dwarf_arrays/main.cpp` is now itself
+  `SOURCE` and calls `reflect::Reflect<Meter>()` directly (`Meter`
+  reaches a direct array member two levels down, via `Buckets`) as a
+  regression check that the restriction is really gone.
+- Still needs every `reflect::Reflect<T>()` target to actually be
+  *discoverable* (declared in `SOURCE` or something it `#include`s
+  locally) — that requirement didn't go away, only the specific
+  "don't call `Reflect<T>()` in `SOURCE`" trap did. An unreachable
+  target now fails fast with a clear message instead of a confusing
+  template-instantiation wall or a silent degradation — see
+  [0015](0015-reflect-reachability-lint.md).
 
 ## Verified
 
@@ -374,6 +383,52 @@ None currently open — see "Fixed bugs" for what used to be here.
   generated line, no error). Covered by
   `test_skipped_member_emits_a_build_warning` and
   `test_type_not_found_emits_a_build_warning`.
+- **`SOURCE` was required to never call `reflect::Reflect<T>()` for a
+  type reaching a direct fixed-size C-array member** — the extraction
+  driver `#include`s `SOURCE` verbatim to force full DWARF emission
+  (step 2), and used to compile it before the generated header had
+  real content, so any such call in `SOURCE` fell back to automatic
+  aggregate reflection's primary template and hard-failed (see
+  [0001](0001-reflection-generation-strategy.md)). Real impact: a
+  legacy codebase where type definitions and `Reflect<T>()` call sites
+  are naturally mixed in one file needed a mandatory split into a
+  types-only header (`tutorials/04_dwarf_arrays/ArrayTypes.hpp`'s
+  pattern) purely to satisfy the pipeline, not for any reason of its
+  own. **Fixed**: `reflect::Reflect<T>()` (`src/TypeInfo.hpp`) becomes
+  a no-op, returning a dummy never-inspected instance, under a new
+  `REFLECTION_DWARF_DRIVER_BUILD` macro;
+  `cmake/GenerateDwarfReflection.cmake` defines that macro only on the
+  driver's own `OBJECT` target, never on the real target. Safe because
+  the driver never needed `Reflect<T>()`'s *result* in the first
+  place — only `T` being a complete type, which the existing
+  `union Touch_T` member already guarantees independently. Covered by
+  `tutorials/04_dwarf_arrays/main.cpp`, which is itself `SOURCE` and
+  calls `reflect::Reflect<Meter>()` (reaching a direct array member
+  two levels down, via `Buckets`) directly from that file, and now
+  builds and runs correctly.
+- **`DW_AT_byte_size` and `DW_AT_data_member_location` crashed the
+  extraction step outright (`ValueError`, not an abstain) for a large
+  real-world struct.** `objdump`'s DWARF text output isn't
+  consistently decimal for either attribute: GCC picks a wider
+  encoding form (`DW_FORM_data4`/`data8`) once a struct's total size,
+  or a member's offset into it, doesn't fit a narrower one
+  (`DW_FORM_data1`/`data2`), and `objdump` renders that wider form in
+  **hex** (`0x123c8`), not decimal. `resolve_type()`/`find_type()`
+  parsed both with a plain, base-10-only `int(raw)`, which crashes on
+  the hex form — confirmed empirically for a struct at/above roughly
+  64KB, and for any member offset at/above the same threshold. Never
+  hit by anything in this repo (no tutorial or test fixture is
+  anywhere near that size); found via a real ~74KB legacy struct.
+  **Fixed**: both call sites (plus a third, identical one for the
+  type's own top-level `byte_size`) now go through a new
+  `parse_dwarf_int()`, which passes `base=0` so Python auto-detects
+  the `0x` prefix either way — exactly what `_array_dimensions()`
+  already did correctly for `DW_AT_count`/`DW_AT_upper_bound`'s
+  identical ambiguity, just not consistently applied to every
+  DWARF-integer attribute this tool reads. Covered by
+  `TestParseDwarfInt` and
+  `test_large_struct_with_hex_encoded_byte_size_resolves_correctly`
+  (a real ~100KB struct compiled and extracted end to end).
 
 ## Future work: enums
 

@@ -52,6 +52,23 @@ Two modes, both driven by CMake (see cmake/GenerateDwarfReflection.cmake):
       "<triple>-objdump") -- verified against QNX SDP 8.0's own
       objdump for an x86_64 target object (see docs/adr/0013's "Tested
       against the real QNX SDP 8.0 toolchain").
+
+  --lint <source.cpp> [--include-dir <dir>]... [--include-dirs-file <file>]
+      Fails (exit 1, one "error:" line per finding on stderr) if
+      <source.cpp> contains a reflect::Reflect<T>() call for a bare
+      struct/class name T that this pipeline's discovery step won't
+      actually be able to generate a DWARF specialization for -- see
+      the "Lint: unreachable reflect::Reflect<T>() targets" section
+      below for exactly what's checked and why. --include-dir (once
+      per directory, order matters, repeatable) and/or
+      --include-dirs-file (one directory per line, blank lines
+      skipped -- how cmake/GenerateDwarfReflection.cmake passes this,
+      via file(GENERATE), to sidestep genex-list-splicing into a
+      command's own argv) should mirror the real target's own include
+      search path, so a "<...>" #include that resolves to
+      a local project header (as opposed to a genuine external
+      system/library one, never opened by this check) is recognized
+      as such.
 """
 
 import re
@@ -667,6 +684,27 @@ def parse_ref(raw: str):
     return int(m.group(1), 16) if m else None
 
 
+def parse_dwarf_int(raw) -> int:
+    """A DWARF integer attribute's text form isn't consistently
+    decimal: objdump prints it in decimal for a narrow encoding form
+    (e.g. DW_FORM_data1/data2, which GCC picks for a small enough
+    value) but in hex (a "0x..." prefix) for a wider one
+    (DW_FORM_data4/data8, needed once the value doesn't fit in a
+    narrower form). A real bug found via a large (>64KB) real-world
+    struct: DW_AT_byte_size and DW_AT_data_member_location both hit
+    this once the struct (or a member's offset into it) is big enough
+    to need a wider form, and plain int(raw) crashed with ValueError
+    on the hex form. base=0 lets Python auto-detect the "0x" prefix
+    either way, exactly like _array_dimensions() already does for
+    DW_AT_count/DW_AT_upper_bound (the identical ambiguity). raw may
+    already be an int (a caller's `or 0` fallback for a missing/empty
+    attribute) or None -- only a non-empty string is ever passed to
+    int() with an explicit base, which requires a string argument."""
+    if not raw:
+        return 0
+    return int(raw, 0) if isinstance(raw, str) else int(raw)
+
+
 def parse_dies(dwarf_text: str):
     dies = []
     current = None
@@ -753,7 +791,7 @@ def resolve_type(offset, dies, by_offset, offset_to_index, _seen=None):
     attrs = die["attrs"]
     if tag == "DW_TAG_base_type" or tag in TYPE_DIE_TAGS:
         name = parse_name(attrs.get("DW_AT_name", "<unknown>"))
-        size = int(attrs.get("DW_AT_byte_size", "0") or 0)
+        size = parse_dwarf_int(attrs.get("DW_AT_byte_size"))
         return (name, size, 1)
     if tag == "DW_TAG_pointer_type":
         inner_name, _, _ = resolve_type(
@@ -778,7 +816,7 @@ def resolve_type(offset, dies, by_offset, offset_to_index, _seen=None):
             return ("void", 0, 1)
         return resolve_type(inner_ref, dies, by_offset, offset_to_index, _seen)
     name = parse_name(attrs.get("DW_AT_name", "<unknown>"))
-    size = int(attrs.get("DW_AT_byte_size", "0") or 0)
+    size = parse_dwarf_int(attrs.get("DW_AT_byte_size"))
     return (name, size, 1)
 
 
@@ -822,7 +860,7 @@ def find_type(type_name: str, dies, by_offset):
         if die["attrs"].get("DW_AT_declaration"):
             continue
         depth = die["depth"]
-        byte_size = int(die["attrs"].get("DW_AT_byte_size", "0") or 0)
+        byte_size = parse_dwarf_int(die["attrs"].get("DW_AT_byte_size"))
         members = []
         skipped = []
         j = i + 1
@@ -830,7 +868,7 @@ def find_type(type_name: str, dies, by_offset):
             child = dies[j]
             if child["depth"] == depth + 1 and child["tag"] == "DW_TAG_member":
                 mname = parse_name(child["attrs"].get("DW_AT_name", ""))
-                moffset = int(child["attrs"].get("DW_AT_data_member_location", "0") or 0)
+                moffset = parse_dwarf_int(child["attrs"].get("DW_AT_data_member_location"))
                 type_ref = parse_ref(child["attrs"].get("DW_AT_type", ""))
                 mtype, msize, mcount = resolve_type(type_ref, dies, by_offset, offset_to_index)
                 if mname:
@@ -919,6 +957,228 @@ def extract(object_path: str, source_path: str, output_path: Path, objdump: str 
     output_path.write_text("\n".join(lines) + "\n")
 
 
+# ---------------------------------------------------------------------------
+# Lint: unreachable reflect::Reflect<T>() targets
+# ---------------------------------------------------------------------------
+# discover_type_names() intentionally never follows a "<...>" #include,
+# and only ever sees what SOURCE reaches by #include at all -- correct
+# for the real pipeline (see that function's own docstring), but it
+# means a reflect::Reflect<T>() call for a plain struct/class T can
+# silently stop meaning what it looks like, in two ways found in
+# practice:
+#   1. T is declared only behind a "<...>" #include, never a "..."
+#      one -- discover_type_names() never generates a DWARF
+#      specialization for it, so the call falls back to automatic
+#      aggregate reflection, which hard-fails to compile for a type
+#      with a direct fixed-size array member or over 64 members (see
+#      docs/adr/0001), and otherwise silently loses real names/hash-
+#      identity even when it happens to compile.
+#   2. T isn't declared as a struct/class anywhere reachable from
+#      SOURCE at all -- e.g. it's defined in a different .cpp,
+#      compiled and linked separately but never #include-d from
+#      SOURCE.
+#
+# This only flags a Reflect<T>() call where T is a BARE, unqualified
+# identifier (no "::", "<", "*", "[") -- a template instantiation,
+# pointer, qualified name, or array alias already has its own correct
+# handling (a real TypeInfo<T> specialization, or DWARF's own
+# template-instantiation discovery) and can't be reliably classified
+# from text alone without risking a false positive -- same "abstain,
+# never guess" policy as the rest of this tool. A bare identifier
+# that's a known non-DWARF leaf (a primitive, a <cstdint>-style
+# fixed-width alias, std::string), a local typedef/using alias, or
+# registered via REFLECT_CLASS_BEGIN/REFLECT_ENUM_BEGIN anywhere in
+# the reachable set is never flagged either.
+
+REFLECT_CALL_RE = re.compile(r"\breflect::Reflect\s*<")
+_BARE_IDENTIFIER_RE = re.compile(r"^[A-Za-z_]\w*$")
+_MACRO_REGISTERED_RE = re.compile(r"\bREFLECT_(?:CLASS|ENUM)_BEGIN\s*\(\s*([A-Za-z_]\w*)\s*\)")
+_TYPEDEF_OR_ALIAS_RE = re.compile(
+    r"\btypedef\b[^;]*?\b([A-Za-z_]\w*)\s*(?:\[[^\]]*\])?\s*;"
+    r"|\busing\s+([A-Za-z_]\w*)\s*="
+)
+SYSTEM_INCLUDE_RE = re.compile(r"#\s*include\s*<([^>]+)>")
+
+# Primitives with their own TypeInfo<T> specialization (src/TypeInfo.hpp)
+# or that reflect fine as an opaque leaf via the primary template
+# regardless (never an aggregate, so automatic aggregate reflection's
+# array/member-count checks never apply), plus <cstdint>/<cstddef>
+# fixed-width aliases -- typedef'd in system headers this lint
+# deliberately never parses, whitelisted explicitly instead of risking
+# a false positive on every one of these extremely common leaf types.
+_KNOWN_LEAF_IDENTIFIERS = {
+    "bool", "char", "signed char", "unsigned char", "short", "unsigned short",
+    "int", "unsigned int", "long", "unsigned long", "long long", "unsigned long long",
+    "float", "double", "std::string",
+    "int8_t", "uint8_t", "int16_t", "uint16_t", "int32_t", "uint32_t",
+    "int64_t", "uint64_t", "size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+}
+
+
+def _blank_block_comment_preserve_lines(m):
+    return "\n".join(" " * len(line) for line in m.group(0).split("\n"))
+
+
+def _strip_comments_preserve_lines(text: str) -> str:
+    """Like _strip_comments, but keeps every character position (and,
+    in particular, every newline) exactly where it was -- a block
+    comment is blanked out line by line instead of collapsed to one
+    space. Used (only) for finding #include directives below: an
+    #include's quoted/angle-bracketed path is a real path, not a
+    string literal to also blank out -- see LOCAL_INCLUDE_RE's own
+    comment for a real bug this exact mistake caused before. This
+    lint reports real file:line locations, so (unlike the rest of this
+    tool, which never needs a source line number) it needs offsets to
+    line up 1:1 with the original file."""
+    text = _BLOCK_COMMENT_RE.sub(_blank_block_comment_preserve_lines, text)
+    text = _LINE_COMMENT_RE.sub(lambda m: " " * len(m.group(0)), text)
+    return text
+
+
+def _strip_noise_preserve_lines(text: str) -> str:
+    """_strip_comments_preserve_lines(), plus blanking string/char
+    literals the same length-and-line-preserving way -- for
+    everything this lint scans OTHER than #include directives (struct/
+    class declarations, macro registrations, typedefs/aliases,
+    reflect::Reflect<T>() call sites), where a literal that merely
+    LOOKS like one of those (e.g. a log message containing
+    "class Foo{") is a real, deliberately-guarded-against false
+    positive elsewhere in this file."""
+    text = _strip_comments_preserve_lines(text)
+    text = _STRING_LITERAL_RE.sub(lambda m: '"' + " " * (len(m.group(0)) - 2) + '"', text)
+    text = _CHAR_LITERAL_RE.sub(lambda m: "'" + " " * (len(m.group(0)) - 2) + "'", text)
+    return text
+
+
+def _lint_scan(source_path: str, include_dirs):
+    """Two passes, both starting at source_path:
+      - LOCAL: follows only "..." #includes (exactly like
+        discover_type_names()) -- gives declared_local (struct/class
+        names) and the call sites to check (Reflect<T>() is only
+        looked for in this set: real project code, not a header
+        outside it).
+      - FULL: also follows a "<...>" #include when its name resolves
+        to an existing file under one of include_dirs (checked in the
+        given order, mirroring a compiler's -I search -- the caller
+        passes the real target's own include directories) -- gives
+        declared_full/registered_full/alias_full, used to tell "only
+        reachable via <...>" apart from "not reachable at all".
+        A "<...>" that doesn't resolve under any include_dirs entry is
+        a genuine external system/library header and is never opened
+        -- this must stay true, or this lint would risk reading
+        arbitrary system headers looking for a coincidentally-matching
+        name.
+    Returns (declared_local, declared_full, registered_full,
+    alias_full, call_sites) -- call_sites is a list of
+    (type_name, file, line).
+    """
+    def scan(start_path, follow_system):
+        visited = set()
+        texts = {}
+
+        def walk(path_str):
+            path = Path(path_str).resolve()
+            if path in visited or not path.is_file():
+                return
+            visited.add(path)
+            raw = path.read_text()
+            # #include paths are found in the comments-only-stripped
+            # text -- NOT the fully-stripped one below, which would
+            # blank out the quoted/angle-bracketed path itself as if
+            # it were an ordinary string literal (see
+            # _strip_noise_preserve_lines's docstring).
+            includes_text = _strip_comments_preserve_lines(raw)
+            text = _strip_noise_preserve_lines(raw)
+            texts[path] = text
+            for m in LOCAL_INCLUDE_RE.finditer(includes_text):
+                walk(str((path.parent / m.group(1)).resolve()))
+            if follow_system:
+                for m in SYSTEM_INCLUDE_RE.finditer(includes_text):
+                    for inc_dir in include_dirs:
+                        candidate = Path(inc_dir) / m.group(1)
+                        if candidate.is_file():
+                            walk(str(candidate.resolve()))
+                            break
+
+        walk(start_path)
+        return texts
+
+    local_texts = scan(source_path, follow_system=False)
+    full_texts = scan(source_path, follow_system=True)
+
+    declared_local = set()
+    declared_full = set()
+    registered_full = set()
+    alias_full = set()
+    call_sites = []
+
+    for text in local_texts.values():
+        for m in TYPE_DECL_RE.finditer(text):
+            if not m.group("enum"):
+                declared_local.add(m.group("name"))
+
+    for path, text in full_texts.items():
+        for m in TYPE_DECL_RE.finditer(text):
+            if not m.group("enum"):
+                declared_full.add(m.group("name"))
+        for m in _MACRO_REGISTERED_RE.finditer(text):
+            registered_full.add(m.group(1))
+        for m in _TYPEDEF_OR_ALIAS_RE.finditer(text):
+            alias_full.add(m.group(1) or m.group(2))
+
+    for path, text in local_texts.items():
+        for m in REFLECT_CALL_RE.finditer(text):
+            result = _find_balanced_template_args(text, m.end() - 1)
+            if result is None:
+                continue
+            type_name, end = result
+            type_name = type_name.strip()
+            if not _BARE_IDENTIFIER_RE.match(type_name):
+                continue  # template/pointer/qualified name -- not this lint's job
+            line = text.count("\n", 0, m.start()) + 1
+            call_sites.append((type_name, str(path), line))
+
+    return declared_local, declared_full, registered_full, alias_full, call_sites
+
+
+def find_unreachable_reflect_targets(source_path: str, include_dirs=()):
+    """Returns a list of human-readable messages, one per
+    reflect::Reflect<T>() call site found unreachable -- see the
+    module-level comment above this section for exactly what counts.
+    Empty list means clean."""
+    declared_local, declared_full, registered_full, alias_full, call_sites = _lint_scan(
+        source_path, list(include_dirs)
+    )
+    known_good = _KNOWN_LEAF_IDENTIFIERS | registered_full | alias_full
+
+    messages = []
+    for type_name, file, line in call_sites:
+        if type_name in declared_local or type_name in known_good:
+            continue
+        if type_name in declared_full:
+            messages.append(
+                f'{file}:{line}: reflect::Reflect<{type_name}>() -- "{type_name}" is '
+                f'declared only behind a "<...>" #include, never a "..." one, so the DWARF '
+                f'pipeline\'s discovery step will never generate a specialization for it. It '
+                f"falls back to automatic aggregate reflection instead, which hard-fails to "
+                f"compile for a type with a direct fixed-size array member or over 64 members "
+                f"(see docs/adr/0001), and otherwise silently loses real names/hash-identity. "
+                f'Fix: #include its defining header with quotes ("...") instead of angle '
+                f"brackets, if it's actually a local project header."
+            )
+        else:
+            messages.append(
+                f'{file}:{line}: reflect::Reflect<{type_name}>() -- "{type_name}" is not '
+                f"declared as a struct/class anywhere in the file set reachable from SOURCE "
+                f"(neither directly nor through any #include, quoted or angle-bracket), and "
+                f"isn't a recognized primitive/alias either. If it's defined in a different "
+                f".cpp compiled and linked separately, its definition isn't visible here at "
+                f"all -- #include the header that declares it (with quotes, so the DWARF "
+                f"pipeline can discover it too)."
+            )
+    return messages
+
+
 def main():
     args = sys.argv[1:]
     if args[:1] == ["--emit-driver"] and len(args) == 3:
@@ -932,6 +1192,31 @@ def main():
                 sys.exit(1)
             objdump = args[5]
         extract(args[1], args[2], Path(args[3]), objdump)
+        return
+    if args[:1] == ["--lint"] and len(args) >= 2:
+        source = args[1]
+        include_dirs = []
+        rest = args[2:]
+        i = 0
+        while i < len(rest):
+            if rest[i] == "--include-dir" and i + 1 < len(rest):
+                include_dirs.append(rest[i + 1])
+                i += 2
+            elif rest[i] == "--include-dirs-file" and i + 1 < len(rest):
+                dirs_file = Path(rest[i + 1])
+                if dirs_file.is_file():
+                    include_dirs.extend(
+                        line.strip() for line in dirs_file.read_text().splitlines() if line.strip()
+                    )
+                i += 2
+            else:
+                print(__doc__, file=sys.stderr)
+                sys.exit(1)
+        messages = find_unreachable_reflect_targets(source, include_dirs)
+        for message in messages:
+            print(f"error: {message}", file=sys.stderr)
+        if messages:
+            sys.exit(1)
         return
     print(__doc__, file=sys.stderr)
     sys.exit(1)
