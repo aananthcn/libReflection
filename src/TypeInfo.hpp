@@ -146,6 +146,7 @@ const ClassReflection& Reflect() {
     static const ClassReflection instance = [] {
         ClassReflection r = TypeInfo<T>::Describe();
         r.hash = detail::ComputeHash(r);
+        r.decl_hash = detail::ComputeDeclHash(r);
         detail::RegisterInGlobalRegistry(r);
         return r;
     }();

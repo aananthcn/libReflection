@@ -2,6 +2,7 @@ add_executable(ReflectionTests
     test_main.cpp
     test_basic_reflection.cpp
     test_hash.cpp
+    test_decl_hash.cpp
     test_enum.cpp
     test_registry.cpp
     test_auto_aggregate.cpp

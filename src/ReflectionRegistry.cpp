@@ -15,12 +15,20 @@ struct ClassHashHasher {
     }
 };
 
+struct DeclHashHasher {
+    std::size_t operator()(const DeclHash& hash) const noexcept {
+        return static_cast<std::size_t>(
+            hash.words[0] ^ hash.words[1] ^ hash.words[2] ^ hash.words[3]);
+    }
+};
+
 // Function-local static: thread-safe, exactly-once initialization
 // (C++11 "magic statics"), no static-init-order concerns. See
 // docs/adr/0008-thread-safety-and-registry.md.
 struct Registry {
     std::mutex mutex;
     std::unordered_map<ClassHash, const ClassReflection*, ClassHashHasher> by_hash;
+    std::unordered_map<DeclHash, const ClassReflection*, DeclHashHasher> by_decl_hash;
     std::unordered_map<std::string, const ClassReflection*> by_name;
 };
 
@@ -39,6 +47,7 @@ void RegisterInGlobalRegistry(const ClassReflection& reflection) {
     // emplace() is a no-op if the key is already present -- harmless,
     // since re-registering the same type yields the same content.
     registry.by_hash.emplace(reflection.GetHash(), &reflection);
+    registry.by_decl_hash.emplace(reflection.GetDeclHash(), &reflection);
     // Automatically-reflected aggregates (docs/adr/0001's revision) all
     // share the sentinel name kAutoAggregateTypeName -- indexing them
     // by name would make every such type silently collide under that
@@ -56,6 +65,13 @@ const ClassReflection* FindByHash(const ClassHash& hash) {
     std::lock_guard<std::mutex> lock(registry.mutex);
     auto it = registry.by_hash.find(hash);
     return it == registry.by_hash.end() ? nullptr : it->second;
+}
+
+const ClassReflection* FindByDeclHash(const DeclHash& hash) {
+    Registry& registry = GetRegistry();
+    std::lock_guard<std::mutex> lock(registry.mutex);
+    auto it = registry.by_decl_hash.find(hash);
+    return it == registry.by_decl_hash.end() ? nullptr : it->second;
 }
 
 const ClassReflection* FindByName(std::string_view type_name) {

@@ -39,6 +39,29 @@ public:
     bool operator!=(const ClassHash& other) const noexcept { return !(*this == other); }
 };
 
+/**
+ * @brief 256-bit declaration-level fingerprint of a reflected type.
+ *
+ * Unlike ClassHash, deliberately excludes offset/size -- it hashes only
+ * class name and, per member, name/type/count (plus enum info) -- so it
+ * stays the same across independently-compiled, differently-ABI'd
+ * binaries built from the same declaration. See
+ * docs/adr/0016-declaration-level-class-hash.md. A distinct C++ type
+ * from ClassHash, not a type alias, so the two can never be compared or
+ * looked up interchangeably by accident even though both happen to be
+ * four uint64_t words.
+ */
+class DeclHash {
+public:
+    std::uint64_t words[4];
+
+    bool operator==(const DeclHash& other) const noexcept {
+        return words[0] == other.words[0] && words[1] == other.words[1] &&
+               words[2] == other.words[2] && words[3] == other.words[3];
+    }
+    bool operator!=(const DeclHash& other) const noexcept { return !(*this == other); }
+};
+
 class ClassReflection {
 public:
     using MemberList = std::vector<ClassReflection>;
@@ -55,6 +78,7 @@ public:
         , count(1)
         , members(MemberList())
         , hash({0, 0, 0, 0})
+        , decl_hash({0, 0, 0, 0})
         , enum_name("")
         , enum_values(EnumValues())
         , bit_flag(false)
@@ -73,6 +97,7 @@ public:
     std::uint32_t GetCount() const noexcept { return count; }
     const MemberList& GetMembers() const noexcept { return members; }
     const ClassHash& GetHash() const noexcept { return hash; }
+    const DeclHash& GetDeclHash() const noexcept { return decl_hash; }
     const std::string& GetEnumName() const noexcept { return enum_name; }
     const EnumValues& GetEnumValues() const noexcept { return enum_values; }
     bool IsBitFlag() const noexcept { return bit_flag; }
@@ -93,6 +118,7 @@ public:
     std::uint32_t count;
     MemberList members;
     ClassHash hash;
+    DeclHash decl_hash;
     std::string enum_name;
     EnumValues enum_values;
     bool bit_flag;

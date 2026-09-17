@@ -21,6 +21,16 @@ std::uint64_t Fnv1a64(std::string_view data, std::uint64_t seed) {
     return hash;
 }
 
+// Shared by ComputeHash and ComputeDeclHash -- both fill four lanes with
+// the same FNV-1a scheme, differing only in what canonical string goes
+// in, per each function's own doc comment.
+constexpr std::uint64_t kSeeds[4] = {
+    0xcbf29ce484222325ull,
+    0x84222325cbf29ce4ull,
+    0x9e3779b97f4a7c15ull,
+    0x2545f4914f6cdd1dull,
+};
+
 void AppendField(std::string& out, std::string_view label, std::string_view value) {
     out += label;
     out += '=';
@@ -59,17 +69,51 @@ std::string CanonicalDescription(const ClassReflection& r) {
     return out;
 }
 
+// Builds a canonical string describing r's declaration only: its own
+// name, and for each member, name/type/count (plus enum info) -- no
+// offset, no size, and (unlike CanonicalDescription above) no recursion
+// into a member's own hash: member.GetType() is a plain string, used
+// directly, so this can be reproduced from a flat wire declaration that
+// only ever has member type *names* as strings, never a nested
+// structural description to recurse into. See ReflectionHash.hpp's
+// ComputeDeclHash doc comment.
+std::string CanonicalDeclDescription(const ClassReflection& r) {
+    std::string out;
+    AppendField(out, "name", r.GetName());
+
+    if (r.IsEnum()) {
+        AppendField(out, "enum", r.GetEnumName());
+        AppendField(out, "bitflag", r.IsBitFlag() ? "1" : "0");
+        std::vector<std::pair<std::string, std::int64_t>> values(
+            r.GetEnumValues().begin(), r.GetEnumValues().end());
+        std::sort(values.begin(), values.end());
+        for (const auto& [key, value] : values) {
+            AppendField(out, "v:" + key, std::to_string(value));
+        }
+    }
+
+    for (const auto& member : r.GetMembers()) {
+        AppendField(out, "member", member.GetName());
+        AppendField(out, "member_type", member.GetType());
+        AppendField(out, "member_count", std::to_string(member.GetCount()));
+    }
+    return out;
+}
+
 } // namespace
 
 ClassHash ComputeHash(const ClassReflection& r) {
     const std::string canonical = CanonicalDescription(r);
-    static constexpr std::uint64_t kSeeds[4] = {
-        0xcbf29ce484222325ull,
-        0x84222325cbf29ce4ull,
-        0x9e3779b97f4a7c15ull,
-        0x2545f4914f6cdd1dull,
-    };
     ClassHash hash{};
+    for (int i = 0; i < 4; ++i) {
+        hash.words[i] = Fnv1a64(canonical, kSeeds[i]);
+    }
+    return hash;
+}
+
+DeclHash ComputeDeclHash(const ClassReflection& r) {
+    const std::string canonical = CanonicalDeclDescription(r);
+    DeclHash hash{};
     for (int i = 0; i < 4; ++i) {
         hash.words[i] = Fnv1a64(canonical, kSeeds[i]);
     }

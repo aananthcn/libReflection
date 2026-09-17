@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Implemented, exactly as scoped in Decision below — a new `DeclHash` type alongside `ClassHash` (`src/ClassReflection.hpp`), computed via `ComputeDeclHash` (`src/ReflectionHash.hpp`/`.cpp`) using this library's own FNV-1a scheme over class name + per-member `(name, type, count)` + enum info, with no offset/size and no recursion into a member's own hash — see `ReflectionHash.cpp`'s `CanonicalDeclDescription` for why the no-recursion choice specifically matters (it's what makes a `DeclHash` reproducible from a flat, wire-derived declaration with no nested structure, per this library's downstream consumer's own ADR: `ByteSoupTk`'s `docs/adr/0006-deserialize-and-reserialize-via-libreflection.md` Decision item 3). Wired into the same lazy-registration point as `ClassHash` (`TypeInfo.hpp`'s `Reflect<T>()`), so every reflected type gets both automatically. `FindByDeclHash()` added alongside `FindByHash()`/`FindByName()`. Verified in `tests/test_decl_hash.cpp`, including the property that actually matters: two hand-built `ClassReflection` values with the same declaration but different offset/size produce the *same* `DeclHash` while `ComputeHash` (`ClassHash`) still tells them apart. Reproducing the external wire format's own (undocumented, MD5-based) algorithm remains future work, per Non-goals below — this ADR only had to get the *input set* right, and that part is done.
 
 ## Context
 
