@@ -1,0 +1,45 @@
+# 0016 — Declaration-Level Class Hash (for External Wire-Format Interop)
+
+## Status
+
+Proposed
+
+## Context
+
+`ClassHash` ([0002](0002-class-hash-algorithm-and-purpose.md)) is deliberately a *layout-level*, ABI-dependent fingerprint: it hashes each member's `name`/`type`/`offset`/`size`/`count`, because its purpose is cross-process shared-memory-IPC layout-drift detection between two independently-built processes of the same source — offset and size are the entire point.
+
+A downstream consumer of this library (`bytesoup-parser`, in a sibling repository) needs to resolve a class it reads out of an external recording format by an identity hash that format embeds on the wire, rather than relying only on a human-readable name string match. That external hash is documented, in that consumer's own recording-format reference, at this level of detail: 128-bit, computed over member types, member names, class names, and enum/POD-ness properties only — explicitly **no** offsets or sizes — so that it stays identical across independently-compiled, differently-ABI'd binaries built from the same source declaration. The exact mixing algorithm and canonicalization used to produce it are not published anywhere available to either project.
+
+`ClassHash` cannot serve this purpose as-is — it is the wrong *kind* of hash for the job (layout-level, not declaration-level) before its algorithm or width even enter into it. Reusing it, or trying to graft an external-compatible algorithm directly into its existing slot, would silently break the shared-memory-IPC contract 0002 already established for existing callers.
+
+This ADR is the first of two steps: get the **input set** right — declaration-only facts, matching exactly what the external hash is documented as covering — using a mixing algorithm entirely of this library's own choosing. Reproducing the external algorithm's exact bit-for-bit output is a separate, later, empirical effort (see Non-goals), since its precise canonicalization is unknown and can only be discovered by testing candidate encodings against reference values obtained from that ecosystem's own tooling.
+
+## Decision
+
+1. Add a second hash, `DeclHash` (reads as "declaration hash," parallel to `ClassHash`), computed alongside `ClassHash` at the same lazy first-registration point ([0008](0008-thread-safety-and-registry.md)'s registry).
+2. **Inputs, deliberately narrower than `ClassHash`'s**: class `name`, and per member (in declaration order) `name`, `type`, `count` — and, if the type is an enum, `enum_name`, each `(key, value)` pair, and `bit_flag`. **Explicitly excluded: `offset`, `size`.** This mirrors, fact-for-fact, what the external format's own declaration-level hash is described as covering (Context), so that once its exact algorithm is later reproduced, only the mixing function needs to change — not the input set — keeping "wrong inputs" and "wrong algorithm" from being tangled together while debugging a mismatch.
+3. **Algorithm for `DeclHash` in this ADR: the same FNV-1a-four-lanes scheme `ClassHash` already uses** ([0002](0002-class-hash-algorithm-and-purpose.md)), applied to the narrower canonical string above. This is *not* claimed to match the external hash — it reuses this library's own proven, dependency-free hashing primitive purely because it's already implemented and correct, giving `DeclHash` a real, self-consistent value from day one (two builds of the same declaration produce the same `DeclHash`, independent of ABI) while the external-compatible algorithm is still being reverse-engineered separately.
+4. **Registry**: add `FindByDeclHash()` alongside the existing `FindByHash()`/`FindByName()` ([0003](0003-public-api-and-namespace.md)'s public API surface), with the same lookup semantics as `FindByHash()`.
+5. **No change to `ClassHash`, `GetHash()`, or any existing caller.** `DeclHash` is purely additive: a new `GetDeclHash()` accessor on `ClassReflection`, a new field — nothing existing is removed or reinterpreted.
+
+## Non-goals
+
+- **Bit-for-bit compatibility with the external format's own declaration hash.** That requires reproducing an algorithm not published anywhere available to either project — only its input set is documented (Context). Reaching real compatibility needs an empirical reverse-engineering pass: generate small known structs, obtain their reference hash from that ecosystem's own tooling (used strictly as an oracle — never a build or runtime dependency of this library), and iterate on a candidate mixing function/canonicalization until outputs match. That pass is deliberately deferred to a follow-up ADR once this one's input set is in place and stable — it is a separate, open-ended risk (an unknown algorithm) from this ADR's risk (choosing the right inputs, which is fully knowable now from documentation alone).
+- **A pluggable/swappable hash-algorithm mechanism.** Not designed here. If and when the external algorithm is reproduced, this ADR's `DeclHash` slot is the natural place to swap in the matching mixing function (or add a third hash alongside it, if keeping both intact turns out to matter) — which of those is chosen is a decision for that follow-up ADR, informed by what's actually learned during reverse-engineering.
+
+## Consequences
+
+**Positive**
+- Separates two independent risks that would otherwise be conflated: "are we hashing the right facts" (fully answerable now, from documentation) vs. "do we have the right mixing algorithm" (answerable only empirically, later). Landing this ADR first means the follow-up effort has only one unknown left to chase.
+- No breaking change: existing `ClassHash`/`GetHash()`/`FindByHash()` callers are untouched, and 0002's shared-memory-IPC contract is preserved exactly as-is.
+- `DeclHash` is independently useful even before wire-compatibility is reached: a real, testable, ABI-independent "did the declaration change" signal (renaming/retyping/adding a member changes it; recompiling for a different ABI does not) — something `ClassHash` deliberately cannot offer, by 0002's own design.
+
+**Negative / risks**
+- Two hashes per reflected class now exist, both plausibly called "the hash" informally — call sites and docs need to say `ClassHash`/`GetHash()` vs. `DeclHash`/`GetDeclHash()` explicitly, so it's always clear which one a given comparison uses and what it actually proves (layout identity vs. declaration identity).
+- `DeclHash` as specified here does **not**, by itself, solve the downstream consumer's actual wire-lookup need — it only establishes the correct input set. Real compatibility still requires the deferred reverse-engineering pass (Non-goals), which may prove difficult or even impossible to complete exactly (e.g. if the external algorithm depends on some detail neither project can observe) — in which case the downstream consumer's existing name-based lookup remains the practical fallback indefinitely, and this ADR's value is limited to the declaration-drift-detection use case on its own.
+
+## Alternatives considered
+
+- **Reuse `ClassHash` unmodified, and just document the mismatch**: rejected — doesn't move toward the downstream consumer's actual need, and 0002 is explicit that `ClassHash` is deliberately layout-level; repurposing it would be a silent, undocumented contract change for existing callers.
+- **Attempt the external algorithm directly, in one step, without first isolating declaration-only inputs**: rejected — conflates "did we pick the right facts to hash" with "did we mix them the right way," making it far harder to tell, when a reproduction attempt fails to match a reference value, which of the two is actually wrong.
+- **Match the external hash's own width (128-bit) for `DeclHash` now, ahead of knowing its algorithm**: rejected — width is a property of whatever mixing algorithm is eventually adopted (a future ADR's decision), not of the input set this ADR is scoping; picking a width now would be guessing at something not yet knowable.
